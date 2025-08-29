@@ -11,7 +11,162 @@ from mbt_gym.gym.index_names import CASH_INDEX, INVENTORY_INDEX, ASSET_PRICE_IND
 from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory
 
 
+def plot_trajectory_extended(env: gym.Env, agent: Agent, seed: int = None):
+    """
+    Enhanced trajectory plotting that handles environments with additional state attributes
+    from stochastic processes (beyond cash, inventory, asset_price).
+    """
+    timestamps = get_timestamps(env)
+    observations, actions, rewards = generate_trajectory(env, agent, seed)
+    action_dim = actions.shape[1]
+    state_dim = observations.shape[1]
+    
+    # Calculate number of additional state dimensions beyond the basic 3 (cash, inventory, time)
+    additional_dims = state_dim - 3
+    
+    # Determine subplot layout based on number of state dimensions
+    if additional_dims <= 1:
+        # Use original 2x2 layout for basic case
+        fig, axes = plt.subplots(2, 2, figsize=(20, 10))
+        axes = axes.flatten()
+    else:
+        # Dynamic layout: ensure we have enough subplots
+        n_plots = 3 + additional_dims  # rewards, actions, basic states + additional states
+        n_cols = min(3, n_plots)
+        n_rows = (n_plots + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(7*n_cols, 5*n_rows))
+        if n_plots == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten() if n_rows > 1 else axes
+    
+    colors = ["r", "k", "b", "g", "m", "c", "y", "orange", "purple", "brown"]
+    rewards = np.squeeze(rewards, axis=1)
+    cum_rewards = np.cumsum(rewards, axis=-1)
+    
+    # Extract basic state components
+    cash_holdings = observations[:, CASH_INDEX, :]
+    inventory = observations[:, INVENTORY_INDEX, :]
+    
+    # Plot 1: Cumulative rewards
+    ax_idx = 0
+    axes[ax_idx].set_title("Cumulative Rewards")
+    for i in range(env.num_trajectories):
+        traj_label = f" trajectory {i}" if env.num_trajectories > 1 else ""
+        axes[ax_idx].plot(timestamps[1:], cum_rewards[i, :], 
+                         label=f"Cum Rewards{traj_label}",
+                         alpha=(i + 1) / (env.num_trajectories + 1))
+    if env.num_trajectories > 1:
+        axes[ax_idx].legend()
+    
+    # Plot 2: Actions
+    ax_idx = 1
+    axes[ax_idx].set_title("Actions")
+    for i in range(env.num_trajectories):
+        traj_label = f" trajectory {i}" if env.num_trajectories > 1 else ""
+        for j in range(action_dim):
+            axes[ax_idx].plot(
+                timestamps[0:-1],
+                actions[i, j, :],
+                label=f"Action {j}{traj_label}",
+                color=colors[j % len(colors)],
+                alpha=(i + 1) / (env.num_trajectories + 1),
+            )
+    axes[ax_idx].legend()
+    
+    # Plot 3: Basic agent state (inventory and cash)
+    ax_idx = 2
+    axes[ax_idx].set_title("Inventory and Cash Holdings")
+    ax_cash = axes[ax_idx].twinx()
+    
+    for i in range(env.num_trajectories):
+        traj_label = f" trajectory {i}" if env.num_trajectories > 1 else ""
+        axes[ax_idx].plot(
+            timestamps,
+            inventory[i, :],
+            label=f"Inventory{traj_label}",
+            color="r",
+            alpha=(i + 1) / (env.num_trajectories + 1),
+        )
+        ax_cash.plot(
+            timestamps,
+            cash_holdings[i, :],
+            label=f"Cash{traj_label}",
+            color="b",
+            alpha=(i + 1) / (env.num_trajectories + 1),
+        )
+    
+    axes[ax_idx].set_ylabel("Inventory", color="r")
+    ax_cash.set_ylabel("Cash Holdings", color="b")
+    axes[ax_idx].legend(loc='upper left')
+    ax_cash.legend(loc='upper right')
+    
+    # print(env.stochastic_process_indices)
+    # Plot additional state dimensions from stochastic processes
+    if hasattr(env, 'stochastic_process_indices') and env.stochastic_process_indices:
+        ax_idx = 3
+        for process_name, (start_idx, end_idx) in env.stochastic_process_indices.items():
+            if end_idx <= start_idx:
+                continue  # Skip processes with no dimensions
+            if ax_idx >= len(axes):
+                break
+
+            axes[ax_idx].set_title(f"{process_name.replace('_', ' ').title()}")
+
+            # The first dimension uses the main axis, others use twinx
+            twin_axes = [axes[ax_idx]]
+            for dim in range(1, end_idx - start_idx):
+                twin_axes.append(axes[ax_idx].twinx())
+                # Offset the spine for visibility
+                twin_axes[-1].spines["right"].set_position(("outward", 60 * dim))
+
+            # Plot each dimension of this stochastic process
+            for dim_idx in range(start_idx, end_idx):
+                ax_dim = twin_axes[dim_idx - start_idx]
+                for i in range(env.num_trajectories):
+                    traj_label = f" traj {i}" if env.num_trajectories > 1 else ""
+                    dim_label = f"Dim {dim_idx-start_idx}{traj_label}" if (end_idx - start_idx) > 1 else f"{process_name}{traj_label}"
+
+                    ax_dim.plot(
+                        timestamps,
+                        observations[i, dim_idx, :],
+                        label=dim_label,
+                        color=colors[(dim_idx-start_idx) % len(colors)],
+                        alpha=(i + 1) / (env.num_trajectories + 1),
+                    )
+                ax_dim.set_ylabel(dim_label)
+                ax_dim.legend(loc='upper left' if dim_idx == start_idx else 'upper right')
+
+            ax_idx += 1
+    else:
+        # Fallback: plot asset prices if ASSET_PRICE_INDEX exists and we have extra space
+        if ax_idx < len(axes) and state_dim > 3:
+            try:
+                asset_prices = observations[:, ASSET_PRICE_INDEX, :]
+                axes[ax_idx].set_title("Asset Prices")
+                for i in range(env.num_trajectories):
+                    traj_label = f" trajectory {i}" if env.num_trajectories > 1 else ""
+                    axes[ax_idx].plot(timestamps, asset_prices[i, :], 
+                                    label=f"Asset Price{traj_label}",
+                                    alpha=(i + 1) / (env.num_trajectories + 1))
+                if env.num_trajectories > 1:
+                    axes[ax_idx].legend()
+                ax_idx += 1
+            except:
+                # ASSET_PRICE_INDEX not defined or out of bounds
+                pass
+
+    # Hide unused subplots
+    for i in range(ax_idx, len(axes)):
+        axes[i].set_visible(False)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Keep the original function for backward compatibility
 def plot_trajectory(env: gym.Env, agent: Agent, seed: int = None):
+    """Original plotting function - kept for backward compatibility"""
     # assert env.num_trajectories == 1, "Plotting a trajectory can only be done when env.num_trajectories == 1."
     timestamps = get_timestamps(env)
     observations, actions, rewards = generate_trajectory(env, agent, seed)
