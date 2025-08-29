@@ -412,4 +412,65 @@ class ConstantElasticityOfVarianceMidpriceModel(MidpriceModel):
         return initial_price + 4 * self.volatility * terminal_time
 
 
+class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
+    def __init__(
+        self,
+        drift: float = 0.0,
+        volatility: float = 1.0,
+        fads_proportion: float = 1,  # fad relevance parameter (which directly define p)
+        #phi: float = 1.0,  # uninformed trader parameter (which directly define psi by relation (61))
+        eta: float = 0.6,  # fad mean reversion speed
+        initial_price: float = 100,
+        initial_fad: float = 0,
+        terminal_time: float = 1.0,
+        step_size: float = 0.01,
+        num_trajectories: int = 1,
+        seed: Optional[int] = None,
+    ):
+        self.drift = drift
+        self.volatility = volatility
+        self.terminal_time = terminal_time
+        self.fads_proportion = fads_proportion
+        self.eta = eta
+        
+        # directly identified paramters
+        self.p = np.sqrt(1-self.fads_proportion**2)
+        # self.psi = (30 - phi * self.terminal_time ) / ... # ???
+        super().__init__(
+            min_value=np.array([[initial_price - (self._get_max_value(initial_price, terminal_time) - initial_price)]]),
+            max_value=np.array([[self._get_max_value(initial_price, terminal_time)]]),
+            step_size=step_size,
+            terminal_time=terminal_time,
+            initial_state=np.array([[initial_price, initial_fad]]),
+            num_trajectories=num_trajectories,
+            seed=seed,
+        )
+
+    def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:
+        # Sample both independent increments simultaneously
+        random_increments = np.sqrt(self.step_size) * self.rng.normal(size=(self.num_trajectories, 2))
+        dB_fad = random_increments[:, 0:1]  # First column for fad
+        dZ_martingale = random_increments[:, 1:2]  # Second column for martingale
+
+        # print("Fad before update:", self.current_state[:, 1][:5])
+        # print("dB_fad (noise for fad):", dB_fad.flatten()[:5])
+        # print("dZ_martingale (noise for martingale):", dZ_martingale.flatten()[:5])
+
+        self.current_state[:, 1] = self.current_state[:, 1] - self.eta * self.current_state[:, 1] * self.step_size + dB_fad.flatten()
+        #print("Fad after update:", self.current_state[:, 1][:5])
+
+        self.stochastic_part = (self.p * dZ_martingale).flatten() + self.fads_proportion * self.current_state[:, 1]
+        # print("Stochastic part:", self.stochastic_part[:5])
+
+        self.current_state[:, 0] = self.current_state[:, 0] + (
+            self.drift * self.step_size
+            + self.volatility * self.stochastic_part
+        )
+        # print("Midprice after update:", self.current_state[:, 0][:5])
+
+
+    def _get_max_value(self, initial_price, terminal_time):
+        # we are assuming that max value is given related just to the brownian motion part without considering the fads
+        return initial_price + 4 * self.volatility * terminal_time
+
 

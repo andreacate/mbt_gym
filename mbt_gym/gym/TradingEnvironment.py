@@ -2,16 +2,16 @@ from collections import OrderedDict
 from copy import copy, deepcopy
 from typing import Union, Tuple, Callable
 
-import gym
+import gymnasium as gym
 import numpy as np
 
-from gym.spaces import Box
+from gymnasium.spaces import Box
 
 from mbt_gym.agents.Agent import Agent
 from mbt_gym.gym.ModelDynamics import ModelDynamics, LimitOrderModelDynamics
 from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory
 from mbt_gym.stochastic_processes.StochasticProcessModel import StochasticProcessModel
-from mbt_gym.stochastic_processes.arrival_models import ArrivalModel, PoissonArrivalModel
+from mbt_gym.stochastic_processes.arrival_models import ArrivalModel, PoissonArrivalModel, HawkesArrivalModel
 from mbt_gym.stochastic_processes.fill_probability_models import FillProbabilityModel, ExponentialFillFunction
 from mbt_gym.stochastic_processes.midprice_models import MidpriceModel, BrownianMotionMidpriceModel
 from mbt_gym.stochastic_processes.price_impact_models import PriceImpactModel
@@ -42,6 +42,7 @@ class TradingEnvironment(gym.Env):
         normalise_action_space: bool = True,
         normalise_observation_space: bool = True,
         normalise_rewards: bool = False,
+        render_mode: str = None,      
     ):
         super(TradingEnvironment, self).__init__()
         self.terminal_time = terminal_time
@@ -52,8 +53,8 @@ class TradingEnvironment(gym.Env):
             midprice_model=BrownianMotionMidpriceModel(
                 step_size=self._step_size, num_trajectories=num_trajectories, seed=seed
             ),
-            arrival_model=PoissonArrivalModel(
-                intensity=np.array([100, 100]), step_size=self._step_size, num_trajectories=num_trajectories, seed=seed
+            arrival_model=HawkesArrivalModel(
+                 step_size=self._step_size, num_trajectories=num_trajectories, seed=seed
             ),
             fill_probability_model=ExponentialFillFunction(
                 step_size=self._step_size, num_trajectories=num_trajectories, seed=seed
@@ -92,6 +93,7 @@ class TradingEnvironment(gym.Env):
                 self.model_dynamics.fill_probability_model, ExponentialFillFunction
             ), "Arrival model must be Poisson and fill probability model must be exponential to scale rewards"
             self.reward_scaling = 1 / self._get_inventory_neutral_rewards()
+        self.render_mode = render_mode
 
     def reset(self):
         for process in self.stochastic_processes.values():
@@ -118,6 +120,7 @@ class TradingEnvironment(gym.Env):
             return obs
 
     def normalise_action(self, action: np.ndarray, inverse: bool = False):
+        # print("Action before normalisation:", action)
         if self.normalise_action_space_ and not inverse:
             return (action - self._intercept_action_norm) / self._gradient_action_norm - 1
         elif self.normalise_action_space_ and inverse:
@@ -201,14 +204,21 @@ class TradingEnvironment(gym.Env):
             fills = self._remove_max_inventory_fills(fills)
         self._update_agent_state(arrivals, fills, action)
         self._update_market_state(arrivals, fills, action)
+        #print(f"Step {self.model_dynamics.state}")
+
         return self.model_dynamics.state
 
     def _update_market_state(self, arrivals, fills, action):
+        # print("Stochastic processes:", list(self.stochastic_processes.keys()))
         for process_name, process in self.stochastic_processes.items():
             process.update(arrivals, fills, action, self.model_dynamics.state)
             lower_index = self.stochastic_process_indices[process_name][0]
             upper_index = self.stochastic_process_indices[process_name][1]
             self.model_dynamics.state[:, lower_index:upper_index] = process.current_state
+            # Debug print to check what is being written
+            #print(f"[{process_name}] indices: {lower_index}:{upper_index}, process.current_state.shape: {process.current_state.shape}")
+            #print(f"[{process_name}] written state:\n{self.model_dynamics.state[:, lower_index:upper_index]}")
+
 
     def _update_agent_state(self, arrivals: np.ndarray, fills: np.ndarray, action: np.ndarray):
         self.model_dynamics.update_state(arrivals, fills, action)

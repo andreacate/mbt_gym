@@ -1,5 +1,5 @@
 import abc
-import gym
+import gymnasium as gym
 from copy import copy
 from typing import Optional
         
@@ -68,7 +68,7 @@ class ModelDynamics(metaclass=abc.ABCMeta):
         else:
             return None
 
-    def _get_fill_multiplier(self):
+    def _get_fill_multiplier(self):     # convert buy/sell depths into signed quantities
         ones = np.ones((self.num_trajectories, 1))
         return np.append(-ones, ones, axis=1)
 
@@ -106,7 +106,7 @@ class LimitOrderModelDynamics(ModelDynamics):
         self.round_initial_inventory = True
         
     def update_state(self, arrivals: np.ndarray, fills: np.ndarray, action: np.ndarray):
-        self.state[:, INVENTORY_INDEX] += np.sum(arrivals * fills * -self.fill_multiplier, axis=1)
+        self.state[:, INVENTORY_INDEX] += np.sum(arrivals * fills * -self.fill_multiplier, axis=1) # all as integers number (1,2,3... shares)
         self.state[:, CASH_INDEX] += np.sum(
                 self.fill_multiplier
                 * arrivals
@@ -118,8 +118,8 @@ class LimitOrderModelDynamics(ModelDynamics):
     def get_action_space(self) -> gym.spaces.Space:
         assert self.max_depth is not None, "For limit orders max_depth cannot be None."
         # agent chooses spread on bid and ask
-        return gym.spaces.Box(low=np.float32(0.0), high=np.float32(self.max_depth), shape=(2,))
-    
+        return gym.spaces.Box(low=np.float32(0.0), high=np.float32(self.max_depth), shape=(2,)) #create a box with 2 dimensions (bid and ask)
+
     def get_required_stochastic_processes(self):
         processes = ["arrival_model", "fill_probability_model"]
         return processes
