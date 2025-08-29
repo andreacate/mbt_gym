@@ -14,7 +14,8 @@ from stable_baselines3.common.vec_env.base_vec_env import (
     VecEnvStepReturn,
 )
 
-from stable_baselines3.common.vec_env.subproc_vec_env import SubprocVecEnv, _flatten_obs
+from stable_baselines3.common.vec_env.subproc_vec_env import SubprocVecEnv, _stack_obs 
+# rename to _stack_obs to avoid conflict with the function in StableBaselines3, see https://stable-baselines3.readthedocs.io/en/master/misc/changelog.html#id24
 
 STORE_TERMINAL_OBSERVATION_INFO = True
 
@@ -104,7 +105,7 @@ class MultiprocessTradingEnv(SubprocVecEnv):
         results = [remote.recv() for remote in self.remotes]
         self.waiting = False
         obs, rews, dones, infos = zip(*results)
-        obs = self.flatten_multi(_flatten_obs(obs, self.observation_space))
+        obs = self.flatten_multi(_stack_obs(obs, self.observation_space))
         rews = self.flatten_multi(np.stack(rews))
         dones = self.flatten_multi(np.stack(dones))
         return obs, rews, dones, list(np.stack(infos).reshape(-1))
@@ -119,5 +120,5 @@ class MultiprocessTradingEnv(SubprocVecEnv):
         for remote in self.remotes:
             remote.send(("reset", None))
         obs = [remote.recv() for remote in self.remotes]
-        obs = _flatten_obs(obs, self.observation_space)
+        obs = _stack_obs(obs, self.observation_space)
         return self.flatten_multi(obs)
