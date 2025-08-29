@@ -1,4 +1,6 @@
 from copy import deepcopy
+from doctest import Example
+from time import time
 
 import gym
 import numpy as np
@@ -7,10 +9,12 @@ from scipy.linalg import expm
 
 from mbt_gym.agents.Agent import Agent
 from mbt_gym.gym.TradingEnvironment import TradingEnvironment
-from mbt_gym.gym.index_names import INVENTORY_INDEX, TIME_INDEX, ASSET_PRICE_INDEX, CASH_INDEX, BID_INDEX, ASK_INDEX
+from mbt_gym.gym.index_names import INVENTORY_INDEX, TIME_INDEX, ASSET_PRICE_INDEX, CASH_INDEX, BID_INDEX, ASK_INDEX, FADS_INDEX
 from mbt_gym.rewards.RewardFunctions import CjMmCriterion, PnL
 from mbt_gym.stochastic_processes.price_impact_models import PriceImpactModel, TemporaryAndPermanentPriceImpact
 from mbt_gym.gym.ModelDynamics import LimitOrderModelDynamics, TradinghWithSpeedModelDynamics
+
+from scipy.integrate import solve_ivp
 
 class RandomAgent(Agent):
     def __init__(self, env: gym.Env, seed: int = None):
@@ -68,13 +72,14 @@ class AvellanedaStoikovAgent(Agent):
         return action
 
     def _get_price_adjustment(self, inventory: int, time: float) -> float:
-        return inventory * self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
+        return inventory * self.risk_aversion * self.volatility**2 * (self.terminal_time - time)  # 3.10 equation
 
     def _get_spread(self, time: float) -> float:
         if self.risk_aversion == 0:
             return 2 / self.fill_exponent  # Limit as risk aversion -> 0
         volatility_aversion_component = self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
-        fill_exponent_component = 2 / self.risk_aversion * np.log(1 + self.risk_aversion / self.fill_exponent)
+        fill_exponent_component = 2 / self.risk_aversion * np.log(1 + self.risk_aversion / self.fill_exponent) #3.12 equation
+        # volatility_aversion_component = 0
         return volatility_aversion_component + fill_exponent_component
 
     def _get_action(self, inventory: int, time: float):
@@ -208,3 +213,188 @@ class CarteaJaimungalOeAgent(Agent):
             )
         )
         return -np.sign(initial_inventory) * action
+
+
+class MMwithFadsInformedUniformedTradersAgent(Agent):
+    def __init__(self, big_phi: float=1, 
+                 alpha: float = 0.001, 
+                 mu: float = 0, 
+                 eta: float = 10, 
+                 gamma: float = 1,
+                 phi: float = 1, 
+                 psi: float = 0, 
+                 k: float = 1, 
+                 sigma: float = 1, 
+                 fads_proportion: float = 1, 
+                 risk_aversion: float = 0.1, 
+                 env: TradingEnvironment = None):
+        self.big_phi = big_phi
+        self.alpha = alpha
+        self.mu = mu
+        self.eta = eta
+        self.gamma = gamma
+        self.phi = phi
+        self.psi = psi
+        self.k = k
+        self.sigma = sigma
+        self.fads_proportion = fads_proportion
+        self.risk_aversion = risk_aversion              # Risk aversion parameter ??? needed maybe just for making comparison with Avellaneda-Stoikov Agent
+        self.env = env or TradingEnvironment()
+        assert isinstance(self.env, TradingEnvironment)
+        self.terminal_time = self.env.terminal_time
+        self.volatility = self.env.model_dynamics.midprice_model.volatility # maybe is our sigma?
+        self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity
+        self.fill_exponent = self.env.model_dynamics.fill_probability_model.fill_exponent
+
+    # TODO actions 
+    def get_action(self, state: np.ndarray):
+        #inventory = state[:, INVENTORY_INDEX]
+        time = state[:, TIME_INDEX]
+        action = self._get_action(time, state)
+        if action.min() < 0:
+            warnings.warn("MM agent is quoting a negative spread")
+        return action
+
+    def _get_spreads(self, time: float, state: np.ndarray) -> float:
+        values_functions = self._approximate_value_functions(state, inventories_add=[-1, 0, 1])
+        value_function_q_neg = values_functions[-1.0]
+        value_function_q = values_functions[0.0]
+        value_function_q_pos = values_functions[1.0]
+        ask_spread = 1/self.k - value_function_q_neg + value_function_q
+        bid_spread = 1/self.k - value_function_q_pos + value_function_q
+        #print("Bid spread:", bid_spread, "Ask spread:", ask_spread)
+        return [bid_spread, ask_spread]
+    
+    def _get_action(self, time: float, state: np.ndarray):
+        bid_half_spread, ask_half_spread = self._get_spreads(time, state)
+        # Convert to column vectors and concatenate horizontally
+        bid_half_spread = bid_half_spread.reshape(-1, 1)
+        ask_half_spread = ask_half_spread.reshape(-1, 1)
+        return np.concatenate([bid_half_spread, ask_half_spread], axis=1)
+    
+    def _approximate_value_functions(self, state: np.ndarray, inventories_add=[-1, 0, 1]):
+        """
+        Approximates the value function for multiple inventory levels.
+        
+        Parameters
+        ----------
+        state : np.ndarray
+            Current state containing inventory, time, and market info.
+        inventories : list of floats
+            List of inventory levels q at which to evaluate the value function.
+
+        Returns
+        -------
+        values : dict
+            Dictionary mapping q -> V(t,q).
+        """
+        inventories = state[:, INVENTORY_INDEX]
+        time = state[:, TIME_INDEX]
+        # market_state = state[:, ASSET_PRICE_INDEX] # TODO is just U or all the price? Adding in the state?
+        market_state = state[:, FADS_INDEX] # TODO is just U or all the price? Adding in the state?
+
+        # Extract scalar time since all trajectories have the same time
+        current_time = time[0]  # Use first element since all are the same
+
+        # Compute coefficients
+        A = self._comp_A_explicit(current_time)
+        b0, b1, c0, c1, c2 = self._solve_BC_system(current_time)
+
+        values = {}
+        for q in inventories_add:
+            inventory = inventories + q
+            B = (b0 + market_state * b1)
+            C = (c0 + market_state * c1 + market_state**2 * c2)
+            V = (inventory**2 * A + inventory * B + C)
+            values[q] = V
+
+        return values
+        
+    # auxiliary functions for the finding approximate value function
+    def _comp_A_explicit(self, t):
+        """
+        Computes the explicit function A(t) based on the parameters big_phi, phi, psi, k, and alpha.
+        """
+
+        # Useful quantities
+        sqrt_big_phi = np.sqrt(self.big_phi)
+        call_kappa = 4 * (self.phi + self.psi) * np.exp(-1) * self.k
+        sqrt_call_kappa = np.sqrt(call_kappa)
+        beta = (sqrt_big_phi + sqrt_call_kappa * self.alpha)/ (sqrt_big_phi - sqrt_call_kappa * self.alpha)
+
+        if np.isclose(sqrt_big_phi, sqrt_call_kappa * self.alpha):
+            return - self.alpha
+        else:
+            exp_term = np.exp(2 * sqrt_big_phi * sqrt_call_kappa * (self.terminal_time - t))
+            numerator = sqrt_big_phi * (1 - exp_term * beta)
+            denominator = sqrt_call_kappa * (1 + exp_term * beta)
+            return numerator / denominator
+        
+
+
+    def _solve_BC_system(self, t):
+        """
+        Solve the coupled system for B(t) and C(t) backward from T to 0.
+        Returns time grid and solutions for b0, b1, c0, c1, c2.
+        """
+
+        def rhs(t, y):
+            # y = [b0, b1, c0, c1, c2]
+            b0, b1, c0, c1, c2 = y
+
+            # --- compute B-part ---
+            db0, db1 = self._compute_B_rhs(t, [b0, b1])
+
+            # --- compute C-part (depends on b0, b1) ---
+            dc0, dc1, dc2 = self._compute_C_rhs(t, [c0, c1, c2], b0, b1)
+
+            return [db0, db1, dc0, dc1, dc2]
+
+        # Terminal conditions at t = T
+        yT = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+        # Integrate backward from T -> 0
+        sol = solve_ivp(rhs, [self.terminal_time, 0.0], yT,
+                        method="RK45", dense_output=True)
+
+        # Evaluate the solution at time t
+        y_at_t = sol.sol(t)
+        b0, b1, c0, c1, c2 = y_at_t
+        return b0, b1, c0, c1, c2
+
+    
+    def _compute_B_rhs(self, t, B):
+        """
+        Computes the right-hand side of the ODE for B(t).
+        Here t is backward time (integrating from T to 0).
+        """
+        A = self._comp_A_explicit(t)
+        b0, b1 = B
+
+        db0 = -self.mu - 4 * self.k * (self.psi + self.phi) * np.exp(-1) * A * b0 # if mu is =0, -> b0 = 0 for every t
+        db1 = + self.eta * self.sigma * self.fads_proportion + self.eta * b1  - 4 * (self.psi + self.phi) * np.exp(-1) * A * b1 - 4 * np.exp(-1) * self.psi * self.fads_proportion * self.sigma * self.gamma * A - 4 * np.exp(-1) * self.k * self.gamma * self.fads_proportion * self.sigma * self.psi * A**2    
+        return [db0, db1]
+
+
+    def _compute_C_rhs(self, t, C, b0, b1):
+        """
+        Computes the right-hand side of the ODE for C(t).
+        Here t is backward time (integrating from T to 0).
+        """
+        A = self._comp_A_explicit(t)
+        c0, c1, c2 = C
+        
+        # Equation (38), lines 3–5
+        dc0 = - c2 - (1 / self.k) * np.exp(-1) * (2 * (self.psi + self.phi) + 2 * self.k * A * (self.phi + self.psi) + self.k**2 * (self.phi + self.psi) * (A**2 + b0**2))
+        dc1 = + self.eta * c1 - (1 / self.k) * np.exp(-1) * (
+            2 * self.psi * self.k * self.sigma * self.gamma * self.fads_proportion * b0 +
+            self.k**2 * (self.phi + self.psi) * (2 * b0 * b1) +
+            2 * self.k**2 * self.psi * self.sigma * self.gamma * self.fads_proportion * A * b0
+        )
+        dc2 = 2 * self.eta * c2 - (1 / self.k) * np.exp(-1) * (
+            self.k**2 * (self.phi + self.psi) * b1**2 +
+            2 * self.k**2 * self.psi * self.sigma * self.gamma * self.fads_proportion * A * b1 +
+            2 * self.psi * self.k * self.sigma * self.gamma * self.fads_proportion * b1
+        )
+        
+        return [dc0, dc1, dc2]
