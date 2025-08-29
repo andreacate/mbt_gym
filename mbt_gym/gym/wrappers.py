@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 
 import numpy as np
 
@@ -22,6 +22,7 @@ class ReduceStateSizeWrapper(gym.Wrapper):
             dtype=np.float64,
         )
         self.list_of_state_indices = list_of_state_indices
+        self.num_trajectories = env.num_trajectories
 
     def reset(self):
         """

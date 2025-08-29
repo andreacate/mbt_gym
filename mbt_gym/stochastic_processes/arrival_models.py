@@ -52,7 +52,7 @@ class PoissonArrivalModel(ArrivalModel):
         pass
 
     def get_arrivals(self) -> np.ndarray:
-        unif = self.rng.uniform(size=(self.num_trajectories, 2))
+        unif = self.rng.uniform(size=(self.num_trajectories, 2))    # geneerate 2 numbers for trajectories (1 for buy 1 for sell)
         return unif < self.intensity * self.step_size
 
 
