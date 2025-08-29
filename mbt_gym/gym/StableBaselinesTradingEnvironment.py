@@ -1,6 +1,6 @@
 from typing import List, Any, Type, Optional, Union, Sequence
 
-import gym
+import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.vec_env import VecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvObs, VecEnvStepReturn, VecEnvIndices
@@ -16,7 +16,10 @@ class StableBaselinesTradingEnvironment(VecEnv):
     ):
         self.env = trading_env
         self.store_terminal_observation_info = store_terminal_observation_info
-        self.actions: np.ndarray = self.env.action_space.sample()
+        self.actions: np.ndarray = self.env.action_space.sample()   
+        # # Ensure render_mode exists
+        # if not hasattr(self.env, 'render_mode'):
+        #     self.env.render_mode = None 
         super().__init__(self.env.num_trajectories, self.env.observation_space, self.env.action_space)
 
     def reset(self) -> VecEnvObs:
@@ -40,7 +43,15 @@ class StableBaselinesTradingEnvironment(VecEnv):
         pass
 
     def get_attr(self, attr_name: str, indices: VecEnvIndices = None) -> List[Any]:
-        pass
+        """Get attribute from the underlying environment."""
+        if hasattr(self.env, attr_name):
+            attr_value = getattr(self.env, attr_name)
+            # Return a list with the same value for all environments
+            return [attr_value for _ in range(self.env.num_trajectories)]
+        else:
+            # Return None for each environment if attribute doesn't exist
+            return [None for _ in range(self.env.num_trajectories)]
+
 
     def set_attr(self, attr_name: str, value: Any, indices: VecEnvIndices = None) -> None:
         pass
