@@ -55,11 +55,11 @@ class ExponentialFillFunction(FillProbabilityModel):
         )
 
     def _get_fill_probabilities(self, depths: np.ndarray) -> np.ndarray:
-        return np.exp(-self.fill_exponent * depths)
+        return np.exp(-self.fill_exponent * depths) 
 
     @property
     def max_depth(self) -> float:
-        return -np.log(0.01) / self.fill_exponent
+        return -np.log(0.01) / self.fill_exponent if self.fill_exponent > 0 else np.inf
 
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None):
         pass
