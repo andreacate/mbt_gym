@@ -60,7 +60,13 @@ class AvellanedaStoikovAgent(Agent):
         assert isinstance(self.env, TradingEnvironment)
         self.terminal_time = self.env.terminal_time
         self.volatility = self.env.model_dynamics.midprice_model.volatility
-        self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity
+        arrival_model = self.env.model_dynamics.arrival_model
+        self.rate_of_arrival = (
+            getattr(arrival_model, "intensity", None)
+            if getattr(arrival_model, "intensity", None) is not None
+            else getattr(arrival_model, "current_state", None)
+            )
+        #self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity if self.env.model_dynamics.arrival_model.intensity else self.env.model_dynamics.arrival_model.current_state
         self.fill_exponent = self.env.model_dynamics.fill_probability_model.fill_exponent
 
     def get_action(self, state: np.ndarray):
@@ -243,7 +249,6 @@ class MMwithFadsInformedUniformedTradersAgent(Agent):
         assert isinstance(self.env, TradingEnvironment)
         self.terminal_time = self.env.terminal_time
         self.volatility = self.env.model_dynamics.midprice_model.volatility # maybe is our sigma?
-        self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity
         self.fill_exponent = self.env.model_dynamics.fill_probability_model.fill_exponent
 
     # TODO actions 
