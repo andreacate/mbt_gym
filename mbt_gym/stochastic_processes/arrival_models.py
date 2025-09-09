@@ -140,14 +140,11 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
         gamma: float = 0.5,
         fads_proportion: float = 0.5,
         sigma: float = 0.5,
-
         terminal_time: float = 1,
         num_trajectories: int = 1,
         seed: Optional[int] = None,
     ):
         self.baseline_arrival_rate = baseline_arrival_rate
-        # self.jump_size = jump_size  # see https://arxiv.org/pdf/1507.02822.pdf, equation (4).
-        # self.mean_reversion_speed = mean_reversion_speed
         self.phi = phi
         self.psi = psi
         self.k = k
@@ -168,11 +165,15 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
         
         # current state is (num_trajectories, 2) meaning for each trajectory we have a buy and sell arrival rate
         # at every step (so time istante) we update the arrival rate according to the formula, so will depend on spread of previous round and the fad
-        # TODO check what is S- and S+ in the paper for the boundary cases
-        #self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.gamma * actions[:, 0]) - self.gamma * (self.sigma * self.fads_proportion * state[:, FADS_INDEX])
-        #self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.gamma * actions[:, 1]) + self.gamma * (self.sigma * self.fads_proportion * state[:, ASSET_PRICE_INDEX])
-        self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.gamma * actions[:, 0]) - self.gamma * (self.sigma * self.fads_proportion * np.maximum(state[:, FADS_INDEX], state[:, ASSET_PRICE_INDEX]))
-        self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.gamma * actions[:, 1]) + self.gamma * (self.sigma * self.fads_proportion * np.minimum(state[:, FADS_INDEX], state[:, ASSET_PRICE_INDEX]))
+        S_minus=-np.inf
+        S_plus=+np.inf
+        # self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.k * actions[:, 0] - self.gamma * (self.sigma * self.fads_proportion * state[:, FADS_INDEX]))
+        # self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.k * actions[:, 1] + self.gamma * (self.sigma * self.fads_proportion * state[:, FADS_INDEX]))
+
+        self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.k * actions[:, 0] - self.gamma * (self.sigma * self.fads_proportion * np.maximum(state[:, FADS_INDEX], S_minus)))
+        self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.k * actions[:, 1] + self.gamma * (self.sigma * self.fads_proportion * np.minimum(state[:, FADS_INDEX], S_plus)))
+        if np.any(self.current_state < 0):
+            print("Warning: Negative arrival rate encountered. Setting to zero.")
         return self.current_state
 
     def get_arrivals(self) -> np.ndarray:
