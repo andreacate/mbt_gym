@@ -419,7 +419,7 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
         volatility: float = 1.0,
         fads_proportion: float = 1,  # fad relevance parameter (which directly define p)
         #phi: float = 1.0,  # uninformed trader parameter (which directly define psi by relation (61))
-        eta: float = 0.6,  # fad mean reversion speed
+        eta: float = 10,  # fad mean reversion speed
         initial_price: float = 100,
         initial_fad: float = 0,
         terminal_time: float = 1.0,
@@ -448,25 +448,27 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
 
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:
         # Sample both independent increments simultaneously
-        random_increments = np.sqrt(self.step_size) * self.rng.normal(size=(self.num_trajectories, 2))
+        random_increments =  self.rng.normal(size=(self.num_trajectories, 2))
         dB_fad = random_increments[:, 0:1]  # First column for fad
-        dZ_martingale = random_increments[:, 1:2]  # Second column for martingale
+        dZ_martingale = random_increments[:, 1:2] * np.sqrt(self.step_size) # Second column for Z martingale
 
-        # print("Fad before update:", self.current_state[:, 1][:5])
-        # print("dB_fad (noise for fad):", dB_fad.flatten()[:5])
-        # print("dZ_martingale (noise for martingale):", dZ_martingale.flatten()[:5])
+        # " Alternative implementation for the OU component:"
+        # --- Euler-Maruyama discretization of the OU process ---
+        #self.current_state[:, 1] = self.current_state[:, 1] - self.eta * self.current_state[:, 1] * self.step_size + dB_fad.flatten()
 
-        self.current_state[:, 1] = self.current_state[:, 1] - self.eta * self.current_state[:, 1] * self.step_size + dB_fad.flatten()
-        #print("Fad after update:", self.current_state[:, 1][:5])
+        # --- Exact OU update for fad ---
+        exp_term = np.exp(-self.eta * self.step_size)
+        std_term = np.sqrt((1 - np.exp(-2 * self.eta * self.step_size)) / (2 * self.eta))
 
+        self.current_state[:, 1] = (self.current_state[:, 1] * exp_term + std_term * np.sqrt(self.step_size) * dB_fad.flatten())
+
+        # Stochastic part of the midprice update
         self.stochastic_part = (self.p * dZ_martingale).flatten() + self.fads_proportion * self.current_state[:, 1]
-        # print("Stochastic part:", self.stochastic_part[:5])
 
         self.current_state[:, 0] = self.current_state[:, 0] + (
             self.drift * self.step_size
             + self.volatility * self.stochastic_part
         )
-        # print("Midprice after update:", self.current_state[:, 0][:5])
 
 
     def _get_max_value(self, initial_price, terminal_time):
