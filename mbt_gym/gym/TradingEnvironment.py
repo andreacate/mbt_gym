@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from copy import copy, deepcopy
 from typing import Union, Tuple, Callable
+from xml.parsers.expat import model
 
 import gymnasium as gym
 import numpy as np
@@ -216,7 +217,7 @@ class TradingEnvironment(gym.Env):
             upper_index = self.stochastic_process_indices[process_name][1]
             self.model_dynamics.state[:, lower_index:upper_index] = process.current_state
             # Debug print to check what is being written
-            #print(f"[{process_name}] indices: {lower_index}:{upper_index}, process.current_state.shape: {process.current_state.shape}")
+            #print(f"[{process_name}] indices: {lower_index}:{upper_index}, process.current_state.shape: {process.current_state.shape}")            
             #print(f"[{process_name}] written state:\n{self.model_dynamics.state[:, lower_index:upper_index]}")
 
 
