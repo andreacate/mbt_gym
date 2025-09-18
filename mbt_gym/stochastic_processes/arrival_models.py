@@ -132,10 +132,9 @@ class HawkesArrivalModel(ArrivalModel):
 class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
     def __init__(
         self,
-        baseline_arrival_rate: np.ndarray = np.array([[0.0, 0.0]]),
         step_size: float = 0.01,
-        phi: float = 0.5,
-        psi: float = 0.5,
+        phi: float = 15,
+        psi: float = 15,
         k: float = 0.5,
         gamma: float = 0.5,
         fads_proportion: float = 0.5,
@@ -144,7 +143,7 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
         num_trajectories: int = 1,
         seed: Optional[int] = None,
     ):
-        self.baseline_arrival_rate = baseline_arrival_rate
+        self.baseline_arrival_rate = np.array([[phi + psi, phi + psi]])
         self.phi = phi
         self.psi = psi
         self.k = k
@@ -156,7 +155,7 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
             max_value=np.array([[1, 1]]) * self._get_max_arrival_rate(),
             step_size=step_size,
             terminal_time=terminal_time,
-            initial_state=baseline_arrival_rate,
+            initial_state=self.baseline_arrival_rate,
             num_trajectories=num_trajectories,
             seed=seed,
         )
@@ -167,8 +166,6 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
         # at every step (so time istante) we update the arrival rate according to the formula, so will depend on spread of previous round and the fad
         S_minus=-np.inf
         S_plus=+np.inf
-        # self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.k * actions[:, 0] - self.gamma * (self.sigma * self.fads_proportion * state[:, FADS_INDEX]))
-        # self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.k * actions[:, 1] + self.gamma * (self.sigma * self.fads_proportion * state[:, FADS_INDEX]))
 
         self.current_state[:,0] = self.phi * np.exp(-self.k * actions[:, 0]) + self.psi * np.exp(-self.k * actions[:, 0] - self.gamma * (self.sigma * self.fads_proportion * np.maximum(state[:, FADS_INDEX], S_minus)))
         self.current_state[:,1] = self.phi * np.exp(-self.k * actions[:, 1]) + self.psi * np.exp(-self.k * actions[:, 1] + self.gamma * (self.sigma * self.fads_proportion * np.minimum(state[:, FADS_INDEX], S_plus)))
@@ -182,3 +179,50 @@ class FadsInformedUniformedTradersArrivalModel(ArrivalModel):
 
     def _get_max_arrival_rate(self):
         return 100 # self.baseline_arrival_rate * 10 TODO: improve this 
+
+
+class ModifiedPoissonArrivalModel(ArrivalModel):
+    def __init__(
+        self,
+        phi: float = 15,
+        psi: float = 15,
+        gamma: float = 0.5,
+        fads_proportion: float = 0.5,
+        sigma: float = 0.5,
+        step_size: float = 0.001,
+        num_trajectories: int = 1,
+        seed: Optional[int] = None,
+    ):  
+        self.phi = phi
+        self.psi = psi
+        self.gamma = gamma
+        self.fads_proportion = fads_proportion
+        self.sigma = sigma
+
+         # Initialize initial_state with correct shape (num_trajectories, 2)
+        #initial_state = np.zeros((1, 2))
+        initial_state = np.ones((1, 2)) * (self.phi + self.psi) 
+
+
+        super().__init__(
+            min_value=np.array([[]]),
+            max_value=np.array([[]]),
+            step_size=step_size,
+            terminal_time=0.0,
+            initial_state=initial_state,
+            num_trajectories=num_trajectories,
+            seed=seed,
+        )
+
+    def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None):
+        S_minus = -np.inf
+        S_plus = +np.inf
+        informed_intensity_bid = self.psi * np.exp(-self.gamma * self.fads_proportion * self.sigma * np.maximum(state[:, FADS_INDEX], S_minus))
+        informed_intensity_ask = self.psi * np.exp(-self.gamma * self.fads_proportion * self.sigma * np.minimum(state[:, FADS_INDEX], S_plus))
+        # Stack as columns to get shape (num_trajectories, 2)
+        self.current_state = np.column_stack([self.phi + informed_intensity_bid, self.phi + informed_intensity_ask])
+        return self.current_state
+    
+    def get_arrivals(self) -> np.ndarray:
+        unif = self.rng.uniform(size=(self.num_trajectories, 2)) 
+        return unif < self.current_state * self.step_size
