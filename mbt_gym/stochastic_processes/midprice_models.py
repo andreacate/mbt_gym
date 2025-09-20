@@ -426,49 +426,69 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
         num_trajectories: int = 1,
         seed: Optional[int] = None,
     ):
-        self.drift = drift
-        self.volatility = volatility
+        self.drift = drift  # μ
+        self.volatility = volatility  # σ 
+        self.fads_proportion = fads_proportion # correlation parameter
+        self.eta = eta  # mean reversion speed
         self.terminal_time = terminal_time
-        self.fads_proportion = fads_proportion
-        self.eta = eta
         
-        # directly identified paramters
-        self.p = np.sqrt(1-self.fads_proportion**2)
-
+        # Derived parameters from paper
+        self.p = np.sqrt(1 - self.fads_proportion**2)  # Independent noise coefficient
+        self.c = self.volatility  # Observation noise coefficient
+        
         super().__init__(
-            min_value=np.array([[initial_price - (self._get_max_value(initial_price, terminal_time) - initial_price)]]),
-            max_value=np.array([[self._get_max_value(initial_price, terminal_time)]]),
+            min_value=np.array([[
+                initial_price - self._get_max_value(initial_price, terminal_time),  # S_t min
+                -10.0,  # U_t min (true fad)
+                -10.0   # Û_t min (filtered fad)
+            ]]),
+            max_value=np.array([[
+                self._get_max_value(initial_price, terminal_time),  # S_t max
+                10.0,   # U_t max (true fad)
+                10.0    # Û_t max (filtered fad)
+            ]]),
             step_size=step_size,
             terminal_time=terminal_time,
             initial_state=np.array([[initial_price, initial_fad]]),
             num_trajectories=num_trajectories,
             seed=seed,
         )
+        
 
+    
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:       
-        # Sample both independent increments simultaneously
-        random_increments =  self.rng.normal(size=(self.num_trajectories, 2))
-        dB_fad = random_increments[:, 0:1]  # First column for fad
-        dZ_martingale = random_increments[:, 1:2] * np.sqrt(self.step_size) # Second column for Z martingale
+        time = state[:, TIME_INDEX]      
+        self.current_time = time[0]  # Use first element since all are the same
+        
+        # --- Sampling: use standard normals for B and Z, then scale by sqrt(dt) where needed ---
+        # draw two independent standard normals per trajectory:
+        normals = self.rng.normal(size=(self.num_trajectories, 2))
+        Z = normals[:, 0]    # standard normal for Z
+        B = normals[:, 1]    # standard normal for B  (used for OU noise)
 
-        # " Alternative implementation for the OU component:"
-        # --- Euler-Maruyama discretization of the OU process ---
-        #self.current_state[:, 1] = self.current_state[:, 1] - self.eta * self.current_state[:, 1] * self.step_size +  np.sqrt(self.step_size) * dB_fad.flatten()
-        # print("case Euler-Maruyama")
-
-        # --- Exact OU update for fad ---
+        # OU exact update uses B directly (std_term already accounts for step)
         exp_term = np.exp(-self.eta * self.step_size)
         std_term = np.sqrt((1 - np.exp(-2 * self.eta * self.step_size)) / (2 * self.eta))
 
-        self.current_state[:, 1] = (self.current_state[:, 1] * exp_term + std_term * dB_fad.flatten())
+        previous_fad = self.current_state[:, 1].copy()
+        # update true fad U_{t+dt}
+        self.current_state[:, 1] = previous_fad * exp_term + std_term * B
 
-        # Stochastic part of the midprice update
-        self.stochastic_part = (self.p * dZ_martingale).flatten() + self.fads_proportion * self.current_state[:, 1]
+        # Build correlated Brownian increment dW_tilde of order sqrt(dt):
+        # dW_tilde = ( p * dZ + q * dB ), where dZ = Z * sqrt(dt), dB = B * sqrt(dt)
+        sqrt_dt = np.sqrt(self.step_size)
+        dZ_inc = Z * sqrt_dt
+        dB_inc = B * sqrt_dt
+        dW_tilde = self.p * dZ_inc + self.fads_proportion * dB_inc  # this is O(sqrt(dt))
 
-        self.current_state[:, 0] = self.current_state[:, 0] + (
-            self.drift * self.step_size
-            + self.volatility * self.stochastic_part
-        )
+        # --- Update midprice S_t (observable):
+        # dS_t = h(U_t) * dt + c * dW_tilde, with h(U)=mu - eta*q*sigma*U
+        drift_contribution = (self.drift - self.eta * self.fads_proportion * self.volatility * previous_fad) * self.step_size
+        noise_contribution = self.c * dW_tilde  # already scaled by sqrt(dt)
+
+        self.current_state[:, 0] = self.current_state[:, 0] + drift_contribution + noise_contribution
+            
+        return self.current_state
 
     def _get_max_value(self, initial_price, terminal_time):
         # we are assuming that max value is given related just to the brownian motion part without considering the fads
@@ -500,9 +520,7 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
         # Derived parameters from paper
         self.p = np.sqrt(1 - self.fads_proportion**2)  # Independent noise coefficient
         self.c = self.volatility  # Observation noise coefficient
-
-
-        
+   
         # Initialize filtering variables
         self.filtered_fad = None  # Û_t = E[U_t | F^S_t]
         self.conditional_variance = None  # P̂_t = E[(U_t - Û_t)²]
