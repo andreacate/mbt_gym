@@ -6,6 +6,7 @@ import gym
 import numpy as np
 import warnings
 from scipy.linalg import expm
+from scipy.integrate import quad
 
 import matplotlib.pyplot as plt   
 
@@ -69,7 +70,7 @@ class AvellanedaStoikovAgent(Agent):
             if getattr(arrival_model, "intensity", None) is not None
             else getattr(arrival_model, "current_state", None)
             )
-        print("type(self.rate_of_arrival):", type(self.rate_of_arrival), "self.rate_of_arrival:", self.rate_of_arrival.shape, self.rate_of_arrival)
+        # print("type(self.rate_of_arrival):", type(self.rate_of_arrival), "self.rate_of_arrival:", self.rate_of_arrival.shape, self.rate_of_arrival)
         #self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity 
         self.fill_exponent = self.env.model_dynamics.fill_probability_model.fill_exponent
 
@@ -126,7 +127,123 @@ class CarteaJaimungalMmAgent(Agent): # market-making agent in a limit order book
             else getattr(arrival_model, "current_state", None)
             )
             self.lambdas = self.lambdas.reshape(-1, 1)
+            #print("self.lambdas:", self.lambdas)
             self.max_inventory = env.max_inventory
+            #self.a_matrix, self.z_vector = self._calculate_a_and_z()
+            self.large_depth = 10_000
+            # print("--- Original Agent ---")
+            # print(f"Lambdas: {self.lambdas.flatten()}")
+            #print(f"A-Matrix (top-left 3x3):\n{self.a_matrix[:3, :3]}")
+
+
+    def get_action(self, state: np.ndarray):
+        if self.inventory_neutral:
+            return self.risk_neutral_action
+        else:
+            current_time = state[0, TIME_INDEX]
+            inventories = state[:, INVENTORY_INDEX]
+            # --- START OF FIX ---
+            # Get the CURRENT arrival intensity from the environment at each step
+            arrival_model = self.env.model_dynamics.arrival_model
+            current_lambdas = (
+                getattr(arrival_model, "intensity", None)
+                if getattr(arrival_model, "intensity", None) is not None
+                else getattr(arrival_model, "current_state", None)
+            )
+            current_lambdas = current_lambdas.reshape(-1, 1)
+
+            # Recalculate the A-matrix and z-vector with the current lambdas
+            a_matrix, z_vector = self._calculate_a_and_z(current_lambdas) # Pass lambdas as an argument
+            # --- END OF FIX ---
+            
+            return self._calculate_deltas(
+                inventories=inventories, 
+                current_time=current_time,
+                a_matrix=a_matrix, # Pass the newly calculated matrix
+                z_vector=z_vector, # Pass the newly calculated vector
+            )
+
+            # assert (
+            #     state[0, TIME_INDEX] == state[-1, TIME_INDEX]
+            # ), "CarteaJaimungalMmAgent needs to be called on a tensor with a uniform time stamp."
+            # current_time = state[0, TIME_INDEX]
+            # inventories = state[:, INVENTORY_INDEX]
+            # return self._calculate_deltas(inventories=inventories, current_time=current_time)
+
+    def _calculate_deltas(self, current_time: float, inventories: np.ndarray, a_matrix: np.ndarray, z_vector: np.ndarray):
+        deltas = np.zeros(shape=(self.num_trajectories, 2))
+        h_t = self._calculate_ht(current_time, a_matrix, z_vector)
+        # If the inventory goes above the max level, we quote a large depth to bring it back and quote on the opposite
+        # side as if we had an inventory equal to sign(inventory) * self.max_inventory.
+        indices = np.clip(self.max_inventory + inventories, 0, 2 * self.max_inventory)
+        indices = indices.astype(int)
+        indices_minus_one = np.clip(indices - 1, 0, 2 * self.max_inventory)
+        indices_plus_one = np.clip(indices + 1, 0, 2 * self.max_inventory)
+        h_0 = h_t[indices]
+        h_plus_one = h_t[indices_plus_one]
+        h_minus_one = h_t[indices_minus_one]
+        max_inventory_bid = h_plus_one == h_0
+        max_inventory_ask = h_minus_one == h_0
+        deltas[:, BID_INDEX] = (1 / self.kappa - h_plus_one + h_0 + self.large_depth * max_inventory_bid).reshape(-1)
+        deltas[:, ASK_INDEX] = (1 / self.kappa - h_minus_one + h_0 + self.large_depth * max_inventory_ask).reshape(-1)
+        return deltas
+
+    def _calculate_ht(self, current_time: float, a_matrix: np.ndarray, z_vector: np.ndarray) -> float:
+        omega_function = self._calculate_omega(current_time, a_matrix, z_vector)
+        return 1 / self.kappa * np.log(omega_function)
+
+    def _calculate_omega(self, current_time: float, a_matrix: np.ndarray, z_vector: np.ndarray):
+        """This is Equation (10.11) from [CJP15]."""
+        return np.matmul(expm(a_matrix * (self.terminal_time - current_time)), z_vector)
+
+    def _calculate_a_and_z(self, lambdas: np.ndarray):
+        matrix_size = 2 * self.max_inventory + 1
+        Amatrix = np.zeros(shape=(matrix_size, matrix_size))
+        z_vector = np.zeros(shape=(matrix_size, 1))
+        for i in range(matrix_size):
+            inventory = self.max_inventory - i
+            Amatrix[i, i] = -self.phi * self.kappa * inventory**2
+            z_vector[i, 0] = np.exp(-self.alpha * self.kappa * inventory**2)
+            if i + 1 < matrix_size:
+                Amatrix[i, i + 1] = lambdas[BID_INDEX] * np.exp(-1)
+            if i > 0:
+                Amatrix[i, i - 1] = lambdas[ASK_INDEX] * np.exp(-1)
+        return Amatrix, z_vector
+    
+    def calculate_true_value_function(self, state: np.ndarray):
+        current_time = state[0, TIME_INDEX]
+        inventories = state[:, INVENTORY_INDEX]
+        value_fct = np.zeros(shape=(self.num_trajectories, 1))
+        h_t = self._calculate_ht(current_time)
+        indices = np.clip(self.max_inventory + inventories, 0, 2 * self.max_inventory)
+        indices = indices.astype(int)
+        h_0 = h_t[indices]
+        value_fct = h_0 + state[:, CASH_INDEX] + state[:, INVENTORY_INDEX] * state[:, ASSET_PRICE_INDEX]
+        return value_fct
+
+class OriginalCarteaJaimungalMmAgent(Agent): 
+    def __init__(
+        self,
+        env: TradingEnvironment = None,
+        max_inventory: int = 100,
+    ):
+        self.env = env or TradingEnvironment()
+        assert isinstance(self.env.model_dynamics, LimitOrderModelDynamics), "Trader must be type LimitOrderTrader"
+        assert isinstance(self.env.reward_function, (CjMmCriterion, PnL)), "Reward function for CjMmAgent is incorrect."
+        self.kappa = self.env.model_dynamics.fill_probability_model.fill_exponent
+        self.num_trajectories = self.env.num_trajectories
+        if isinstance(self.env.reward_function, PnL):
+            self.inventory_neutral = True
+            self.risk_neutral_action = 1 / self.kappa * np.ones((env.num_trajectories, env.action_space.shape[0]))
+        else:
+            self.inventory_neutral = False
+            self.phi = env.reward_function.per_step_inventory_aversion
+            self.alpha = env.reward_function.terminal_inventory_aversion
+            assert self.env.reward_function.inventory_exponent == 2.0, "Inventory exponent must be = 2."
+            self.terminal_time = self.env.terminal_time
+            self.lambdas = np.array([[30.0], [30.0]])
+            #self.lambdas = self.env.model_dynamics.arrival_model.intensity
+            self.max_inventory = max_inventory
             self.a_matrix, self.z_vector = self._calculate_a_and_z()
             self.large_depth = 10_000
 
@@ -161,6 +278,122 @@ class CarteaJaimungalMmAgent(Agent): # market-making agent in a limit order book
 
     def _calculate_ht(self, current_time: float) -> float:
         omega_function = self._calculate_omega(current_time)
+        # print("omega_function:", omega_function.flatten())
+        return 1 / self.kappa * np.log(omega_function)
+
+    def _calculate_omega(self, current_time: float):
+        """This is Equation (10.11) from [CJP15]."""
+        # print("self.a_matrix:", self.a_matrix)
+        # print("self.z_vector:", self.z_vector.flatten())
+        # print("self.terminal_time - current_time:", self.terminal_time - current_time)
+        # print("expm(self.a_matrix * (self.terminal_time - current_time)):", expm(self.a_matrix * (self.terminal_time - current_time)))
+        return np.matmul(expm(self.a_matrix * (self.terminal_time - current_time)), self.z_vector)
+
+    def _calculate_a_and_z(self):
+        matrix_size = 2 * self.max_inventory + 1
+        Amatrix = np.zeros(shape=(matrix_size, matrix_size))
+        z_vector = np.zeros(shape=(matrix_size, 1))
+        # Add debug prints
+        # print(f"alpha: {self.alpha}, kappa: {self.kappa}, phi: {self.phi}")
+        for i in range(matrix_size):
+            inventory = self.max_inventory - i
+            Amatrix[i, i] = -self.phi * self.kappa * inventory**2
+            z_term = -self.alpha * self.kappa * inventory**2
+            z_vector[i, 0] = np.exp(z_term)
+            # print(f"i: {i}, inventory: {inventory}, Amatrix[{i},{i}]: {Amatrix[i,i]}, z_vector[{i},0]: {z_vector[i,0]}")
+            if i + 1 < matrix_size:
+                Amatrix[i, i + 1] = self.lambdas[BID_INDEX] * np.exp(-1)
+            if i > 0:
+                Amatrix[i, i - 1] = self.lambdas[ASK_INDEX] * np.exp(-1)
+        return Amatrix, z_vector
+    
+    def calculate_true_value_function(self, state: np.ndarray):
+        current_time = state[0, TIME_INDEX]
+        inventories = state[:, INVENTORY_INDEX]
+        value_fct = np.zeros(shape=(self.num_trajectories, 1))
+        h_t = self._calculate_ht(current_time)
+        indices = np.clip(self.max_inventory + inventories, 0, 2 * self.max_inventory)
+        indices = indices.astype(int)
+        h_0 = h_t[indices]
+        value_fct = h_0 + state[:, CASH_INDEX] + state[:, INVENTORY_INDEX] * state[:, ASSET_PRICE_INDEX]
+        return value_fct
+
+
+class ModifiedCarteaJaimungalMmAgent(Agent): # market-making agent in a limit order book
+    def __init__(
+        self,
+        env: TradingEnvironment = None,
+    ):
+        self.env = env or TradingEnvironment()
+        assert isinstance(self.env.model_dynamics, LimitOrderModelDynamics), "Trader must be type LimitOrderTrader"
+        assert isinstance(self.env.reward_function, (CjMmCriterion, PnL)), "Reward function for CjMmAgent is incorrect."
+        self.kappa = self.env.model_dynamics.fill_probability_model.fill_exponent
+        self.num_trajectories = self.env.num_trajectories
+        if isinstance(self.env.reward_function, PnL):
+            self.inventory_neutral = True
+            self.risk_neutral_action = 1 / self.kappa * np.ones((env.num_trajectories, env.action_space.shape[0]))
+        else:
+            self.inventory_neutral = False
+            self.big_phi = env.reward_function.per_step_inventory_aversion
+            self.alpha = env.reward_function.terminal_inventory_aversion
+            assert self.env.reward_function.inventory_exponent == 2.0, "Inventory exponent must be = 2."
+            self.terminal_time = self.env.terminal_time
+            # arrival_model = self.env.model_dynamics.arrival_model
+            self.gamma = self.env.model_dynamics.arrival_model.gamma
+            self.eta = self.env.model_dynamics.midprice_model.eta
+            self.phi = self.env.model_dynamics.arrival_model.phi
+            self.psi = self.env.model_dynamics.arrival_model.psi
+            self.sigma = self.env.model_dynamics.midprice_model.volatility
+            self.fads_proportion =  self.env.model_dynamics.midprice_model.fads_proportion
+            self.call_kappa = self.phi + self.psi / self.terminal_time * self._compute_integral()
+
+            self.lambdas = np.array([[self.call_kappa], [self.call_kappa]])
+            #print("self.lambdas:", self.lambdas)
+            self.max_inventory = env.max_inventory
+            self.a_matrix, self.z_vector = self._calculate_a_and_z()
+            self.large_depth = 10_000
+            # print("--- Modified Agent ---")
+            # print(f"Integral value: {self._compute_integral()}")
+            # print(f"self.phi: {self.phi}, self.psi: {self.psi}")
+            # print(f"call_kappa: {self.call_kappa}")
+            # print(f"Lambdas: {self.lambdas.flatten()}")
+            # #self.a_matrix, self.z_vector = self._calculate_a_and_z()
+            # print(f"A-Matrix (top-left 3x3):\n{self.a_matrix[:3, :3]}")
+
+    def get_action(self, state: np.ndarray):
+        if self.inventory_neutral:
+            return self.risk_neutral_action
+        else:
+            assert (
+                state[0, TIME_INDEX] == state[-1, TIME_INDEX]
+            ), "CarteaJaimungalMmAgent needs to be called on a tensor with a uniform time stamp."
+            current_time = state[0, TIME_INDEX]
+            inventories = state[:, INVENTORY_INDEX]
+            return self._calculate_deltas(inventories=inventories, current_time=current_time)
+
+    def _calculate_deltas(self, current_time: float, inventories: np.ndarray):
+        deltas = np.zeros(shape=(self.num_trajectories, 2))
+        h_t = self._calculate_ht(current_time)
+        # If the inventory goes above the max level, we quote a large depth to bring it back and quote on the opposite
+        # side as if we had an inventory equal to sign(inventory) * self.max_inventory.
+        indices = np.clip(self.max_inventory + inventories, 0, 2 * self.max_inventory)
+        indices = indices.astype(int)
+        indices_minus_one = np.clip(indices - 1, 0, 2 * self.max_inventory)
+        indices_plus_one = np.clip(indices + 1, 0, 2 * self.max_inventory)
+        h_0 = h_t[indices]
+        h_plus_one = h_t[indices_plus_one]
+        h_minus_one = h_t[indices_minus_one]
+        max_inventory_bid = h_plus_one == h_0
+        max_inventory_ask = h_minus_one == h_0
+        deltas[:, BID_INDEX] = (1 / self.kappa - h_plus_one + h_0 + self.large_depth * max_inventory_bid).reshape(-1)
+        deltas[:, ASK_INDEX] = (1 / self.kappa - h_minus_one + h_0 + self.large_depth * max_inventory_ask).reshape(-1)
+        return deltas
+
+    def _calculate_ht(self, current_time: float) -> float:
+        omega_function = self._calculate_omega(current_time)
+        if np.any(omega_function <= 0):
+            print(f"[Warning] omega_function hit non-positive value at t={current_time}")   
+        omega_function = np.maximum(omega_function, 1e-12)
         return 1 / self.kappa * np.log(omega_function)
 
     def _calculate_omega(self, current_time: float):
@@ -173,7 +406,7 @@ class CarteaJaimungalMmAgent(Agent): # market-making agent in a limit order book
         z_vector = np.zeros(shape=(matrix_size, 1))
         for i in range(matrix_size):
             inventory = self.max_inventory - i
-            Amatrix[i, i] = -self.phi * self.kappa * inventory**2
+            Amatrix[i, i] = -self.big_phi * self.kappa * inventory**2
             z_vector[i, 0] = np.exp(-self.alpha * self.kappa * inventory**2)
             if i + 1 < matrix_size:
                 Amatrix[i, i + 1] = self.lambdas[BID_INDEX] * np.exp(-1)
@@ -191,6 +424,23 @@ class CarteaJaimungalMmAgent(Agent): # market-making agent in a limit order book
         h_0 = h_t[indices]
         value_fct = h_0 + state[:, CASH_INDEX] + state[:, INVENTORY_INDEX] * state[:, ASSET_PRICE_INDEX]
         return value_fct
+    
+    def _compute_integral(self):
+        c = self.gamma * self.sigma * self.fads_proportion
+        u0 = 0
+        xi=1
+        if self.fads_proportion == 0:
+            return self.terminal_time
+        def m(t):
+            return u0 * np.exp(-self.eta * t)
+
+        def v(t):
+            return (xi**2) / (2.0 * self.eta) * (1.0 - np.exp(-2.0 * self.eta * t))
+
+        def integrand(t):
+            return np.exp(c * m(t) + 0.5 * (c**2) * v(t))
+        integral, _ = quad(integrand, 0.0, self.terminal_time)
+        return integral
 
 
 class CarteaJaimungalOeAgent(Agent): # optimal execution agent (liquidation problem)
@@ -444,26 +694,9 @@ class OptimizedFullInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         
         # Pre-compute all ODE solutions at initialization
         self.time_grid_size = int(self.terminal_time // self.step_size + 1)
-        self._print_parameters()
+        #self._print_parameters()
         self._precompute_all_solutions()
         print(f"✓ Pre-computed ODE solutions for {self.time_grid_size} time points")
-    
-    def _print_parameters(self):
-        """Prints all model parameters for verification."""
-        print("\n--- Model Parameter Verification ---")
-        print(f"  Terminal Time (T): {self.terminal_time}")
-        print(f"  Step Size (dt): {self.step_size}")
-        print(f"  Per-step Inventory Aversion (big_phi): {self.big_phi}")
-        print(f"  Terminal Inventory Aversion (alpha): {self.alpha}")
-        print(f"  Midprice Drift (mu): {self.mu}")
-        print(f"  Fads Mean Reversion (eta): {self.eta}")
-        print(f"  Order Flow Intensity (gamma): {self.gamma}")
-        print(f"  Order Flow Sensitivity (phi): {self.phi}")
-        print(f"  Fads Order Flow Sensitivity (psi): {self.psi}")
-        print(f"  Fill Exponent (k): {self.k}")
-        print(f"  Volatility (sigma): {self.sigma}")
-        print(f"  Fads Proportion (q): {self.fads_proportion}")
-        print("------------------------------------\n")
     
     def _precompute_all_solutions(self):
         """
@@ -499,8 +732,8 @@ class OptimizedFullInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         
         # Also precompute A(t) for all times (since it's analytical)
         self.precomputed_A = np.array([self._comp_A_explicit(t) for t in self.time_grid])
-        print("Precomputed A(T) value:", self.precomputed_A[0])
-        print("Precomputed A(0) value:", self.precomputed_A[-1])
+        # print("Precomputed A(T) value:", self.precomputed_A[0])
+        # print("Precomputed A(0) value:", self.precomputed_A[-1])
     
     def _get_coefficients_fast(self, t: float):
         """
@@ -552,32 +785,6 @@ class OptimizedFullInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         bid_half_spread = bid_half_spread.reshape(-1, 1)
         ask_half_spread = ask_half_spread.reshape(-1, 1)
         return np.concatenate([bid_half_spread, ask_half_spread], axis=1)
-
-    # TODO: not used anymore, since spread computed directly from coefficients
-    def _approximate_value_functions(self, state: np.ndarray, inventories_add=[-1, 0, 1]):
-        """
-        OPTIMIZED: Uses fast coefficient lookup instead of solving ODEs.
-        """
-        inventories = state[:, INVENTORY_INDEX]
-        time = state[:, TIME_INDEX]
-        market_state = state[:, FADS_INDEX]
-        
-        current_time = time[0]  # Use first element since all are the same
-        
-        # Get coefficients via interpolation (not ODE solving!)
-        A, b0, b1, c0, c1, c2 = self._get_coefficients_fast(current_time)
-        
-        values = {}
-        for q in inventories_add:
-            inventory = inventories + q
-            # Normalize inventory for numerical stability
-            # norm_inventory = inventory / self.env.max_inventory
-            B = (b0 + market_state * b1)
-            C = (c0 + market_state * c1 + market_state**2 * c2)
-            V = (inventory**2 * A + inventory * B + C)
-            values[q] = V
-        
-        return values
     
     # Auxiliary functions but
     def _comp_A_explicit(self, t):
@@ -589,6 +796,7 @@ class OptimizedFullInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         if np.isclose(sqrt_big_phi, sqrt_call_kappa * self.alpha):
             return -self.alpha
         else:
+            #exp_term = np.exp(2 * sqrt_big_phi * call_kappa * (self.terminal_time - t))
             exp_term = np.exp(2 * sqrt_big_phi * sqrt_call_kappa * (self.terminal_time - t))
             numerator = sqrt_big_phi * (1 - exp_term * beta)
             denominator = sqrt_call_kappa * (1 + exp_term * beta)
@@ -892,80 +1100,13 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
 
         self._precompute_all_solutions()
         print(f"✓ Pre-computed ODE solutions for {self.time_grid_size} time points")
-
-    # def _precompute_all_solutions(self):
-    #     def rhs(t, y):
-    #         # Unpack state variables
-    #         b0, b1, c0, c1, c2 = y
-            
-    #         # Debug B equations
-    #         try:
-    #             db0, db1 = self._compute_B_rhs(t, [b0, b1])
-    #             print(f"B system at t={t:.4f}:")
-    #             print(f"  Input: b0={b0:.6f}, b1={b1:.6f}")
-    #             print(f"  Output: db0={db0:.6f}, db1={db1:.6f}")
-                
-    #             # Check for invalid B values
-    #             if any(np.isnan([db0, db1])) or any(np.isinf([db0, db1])):
-    #                 raise ValueError(f"Invalid B values: db0={db0}, db1={db1}")
-                    
-    #         except Exception as e:
-    #             print(f"Error in B system: {str(e)}")
-    #             print(f"Current A(t)={self._comp_A_explicit(t):.6f}")
-    #             raise
-                
-    #         # Debug C equations
-    #         try:
-    #             dc0, dc1, dc2 = self._compute_C_rhs(t, [c0, c1, c2], b0, b1)
-    #             print(f"C system at t={t:.4f}:")
-    #             print(f"  Input: c0={c0:.6f}, c1={c1:.6f}, c2={c2:.6f}")
-    #             print(f"  Output: dc0={dc0:.6f}, dc1={dc1:.6f}, dc2={dc2:.6f}")
-                
-    #             # Check for invalid C values
-    #             if any(np.isnan([dc0, dc1, dc2])) or any(np.isinf([dc0, dc1, dc2])):
-    #                 raise ValueError(f"Invalid C values: dc0={dc0}, dc1={dc1}, dc2={dc2}")
-                    
-    #         except Exception as e:
-    #             print(f"Error in C system: {str(e)}")
-    #             raise
-                
-    #         return [db0, db1, dc0, dc1, dc2]
-
-    #     # Test with smaller time steps first
-    #     test_t = np.linspace(self.terminal_time, 0, 5)
-    #     y0 = [0.0, 0.0, 0.0, 0.0, 0.0]  # Terminal conditions
-        
-    #     print("Starting ODE solution with parameters:")
-    #     print(f"  phi={self.phi:.4f}, psi={self.psi:.4f}")
-    #     print(f"  eta={self.eta:.4f}, gamma={self.gamma:.4f}")
-    #     print(f"  k={self.k:.4f}, sigma={self.sigma:.4f}")
-    #     print(f"  fads_proportion={self.fads_proportion:.4f}")
-        
-    #     sol = solve_ivp(rhs, 
-    #                 [self.terminal_time, 0.0], 
-    #                 y0,
-    #                 t_eval=test_t, 
-    #                 method='RK45',
-    #                 rtol=1e-6, 
-    #                 atol=1e-8,
-    #                 max_step=0.1)
-        
-    #     if not sol.success:
-    #         print(f"ODE solver failed: {sol.message}")
-    #         print(f"Last successful step at t={sol.t[-1]:.4f}")
-    #         raise RuntimeError("ODE solution failed")
-
     
     def _precompute_all_solutions(self):
         """
         Solve the ODE system once for the entire time horizon.
         Store results for fast lookup during trading.
-        TODO: possible improvement, pass A(t) to the compute_B_rhs and compute_C_rhs functions to avoid recomputing it every time.
         """
-        print("Starting precomputation with parameters:")
-        print(f"phi={self.phi}, psi={self.psi}, eta={self.eta}")
-        print(f"gamma={self.gamma}, k={self.k}, sigma={self.sigma}")
-        print(f"fads_proportion={self.fads_proportion}")
+
         def rhs(t, y):
             b0, b1, c0, c1, c2 = y
             db0, db1 = self._compute_B_rhs(t, [b0, b1])
@@ -1001,25 +1142,6 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         
         # Also precompute A(t) for all times (since it's analytical)
         self.precomputed_A = np.array([self._comp_A_explicit(t) for t in self.time_grid])
-
-        # # After computing solutions, add this debug:
-        # print("\n=== Precomputed Solution Ranges ===")
-        # print(f"Time grid: [{min(self.time_grid)}, {max(self.time_grid)}], length={len(self.time_grid)}")
-        # print(f"A range: [{min(self.precomputed_A)}, {max(self.precomputed_A)}]")
-        # print(f"b0 range: [{min(self.precomputed_b0)}, {max(self.precomputed_b0)}]")
-        # print(f"b1 range: [{min(self.precomputed_b1)}, {max(self.precomputed_b1)}]")
-        # print(f"c0 range: [{min(self.precomputed_c0)}, {max(self.precomputed_c0)}]")
-        # print(f"c1 range: [{min(self.precomputed_c1)}, {max(self.precomputed_c1)}]")
-        # print(f"c2 range: [{min(self.precomputed_c2)}, {max(self.precomputed_c2)}]")
-        
-        # # Sample some values for verification
-        # print("\nSample values at t=0, T/2, T:")
-        # for t in [0.0, self.terminal_time/2, self.terminal_time]:
-        #     print(f"\nt = {t}:")
-        #     A = np.interp(t, self.time_grid[::-1], self.precomputed_A[::-1])
-        #     b0 = np.interp(t, self.time_grid[::-1], self.precomputed_b0[::-1])
-        #     print(f"A(t) = {A:.6f}")
-        #     print(f"b0(t) = {b0:.6f}")
         
     def _get_coefficients_fast(self, t: float):
         """
@@ -1038,42 +1160,6 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         
         return A, b0, b1, c0, c1, c2
     
-    # def _get_coefficients_fast(self, t: float):
-    #     """
-    #     Fast lookup of ODE solutions at time t using interpolation.
-    #     """
-    #     # Debug print
-    #     print("\n=== Coefficient Lookup Debug ===")
-    #     print(f"Looking up coefficients for t = {t}")
-    #     print(f"Time grid range: [{min(self.time_grid)}, {max(self.time_grid)}]")
-        
-    #     # Handle boundary cases
-    #     t = np.clip(t, 0.0, self.terminal_time)
-    #     print(f"After clipping: t = {t}")
-        
-    #     # Get indices for debugging interpolation
-    #     idx = np.searchsorted(self.time_grid[::-1], t)  # Note: time_grid is in reverse order
-    #     print(f"Nearest time grid indices: {idx-1}, {idx}")
-    #     print(f"Corresponding time points: {self.time_grid[-(idx):-(idx-2) if idx > 0 else None]}")
-        
-    #     # Linear interpolation
-    #     b0 = np.interp(t, self.time_grid[::-1], self.precomputed_b0[::-1])
-    #     b1 = np.interp(t, self.time_grid[::-1], self.precomputed_b1[::-1])
-    #     c0 = np.interp(t, self.time_grid[::-1], self.precomputed_c0[::-1])
-    #     c1 = np.interp(t, self.time_grid[::-1], self.precomputed_c1[::-1])
-    #     c2 = np.interp(t, self.time_grid[::-1], self.precomputed_c2[::-1])
-    #     A = np.interp(t, self.time_grid[::-1], self.precomputed_A[::-1])
-        
-    #     print("\nInterpolated values:")
-    #     print(f"A: {A:.6f}")
-    #     print(f"b0: {b0:.6f}")
-    #     print(f"b1: {b1:.6f}")
-    #     print(f"c0: {c0:.6f}")
-    #     print(f"c1: {c1:.6f}")
-    #     print(f"c2: {c2:.6f}")
-        
-    #     return A, b0, b1, c0, c1, c2
-    
     def get_action(self, state: np.ndarray):
         time = state[:, TIME_INDEX]
         action = self._get_action(time, state)
@@ -1089,49 +1175,6 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
         ask_spread = 1/self.k - value_function_q_neg + value_function_q
         bid_spread = 1/self.k - value_function_q_pos + value_function_q
         return [bid_spread, ask_spread]
-    
-    # def _get_spreads(self, time: float, state: np.ndarray) -> float:
-    #     values_functions = self._approximate_value_functions(state, inventories_add=[-1, 0, 1])
-        
-    #     value_function_q_neg = values_functions[-1.0]
-    #     value_function_q = values_functions[0.0]
-    #     value_function_q_pos = values_functions[1.0]
-        
-    #     bid_spread = 1/self.k - value_function_q_pos + value_function_q
-    #     ask_spread = 1/self.k - value_function_q_neg + value_function_q
-        
-    #     print(f"\nSpread calculations at t={float(time):.4f}:")
-    #     print(f"V(q-1) mean: {np.mean(value_function_q_neg):.6f}")
-    #     print(f"V(q) mean: {np.mean(value_function_q):.6f}")
-    #     print(f"V(q+1) mean: {np.mean(value_function_q_pos):.6f}")
-    #     print(f"Mean spreads - Bid: {np.mean(bid_spread):.6f}, Ask: {np.mean(ask_spread):.6f}")
-        
-    #     return [bid_spread, ask_spread]
-
-    # def _get_spreads(self, time: float, state: np.ndarray) -> float:
-    #     print("\nDebug - State values:")
-    #     print(f"Time: {time}")
-    #     print(f"Inventory: {state[:, INVENTORY_INDEX]}")
-    #     print(f"Market state: {state[:, FADS_INDEX]}")
-        
-    #     values_functions = self._approximate_value_functions(state, inventories_add=[-1, 0, 1])
-    #     print("\nDebug - Value functions:")
-    #     print(f"V(q-1): {values_functions[-1.0]}")
-    #     print(f"V(q): {values_functions[0.0]}")
-    #     print(f"V(q+1): {values_functions[1.0]}")
-        
-    #     value_function_q_neg = values_functions[-1.0]
-    #     value_function_q = values_functions[0.0]
-    #     value_function_q_pos = values_functions[1.0]
-        
-    #     ask_spread = 1/self.k - value_function_q_neg + value_function_q
-    #     bid_spread = 1/self.k - value_function_q_pos + value_function_q
-        
-    #     print("\nDebug - Calculated spreads:")
-    #     print(f"Ask spread: {ask_spread}")
-    #     print(f"Bid spread: {bid_spread}")
-        
-    #     return [bid_spread, ask_spread]
     
     def _get_action(self, time: float, state: np.ndarray):
         bid_half_spread, ask_half_spread = self._get_spreads(time, state)
@@ -1159,142 +1202,21 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
             values[q] = V
         
         return values
-    # def _approximate_value_functions(self, state: np.ndarray, inventories_add=[-1, 0, 1]):
-    #     inventories = state[:, INVENTORY_INDEX]
-    #     time = state[:, TIME_INDEX]
-    #     market_state = state[:, FILTERED_FADS_INDEX]
-    #     current_time = time[0]
-        
-    #     # Get coefficients and log them
-    #     A, b0, b1, c0, c1, c2 = self._get_coefficients_fast(current_time)
-    #     print(f"\nValue function components at t={current_time:.4f}:")
-    #     print(f"A coefficient: {float(A):.6f}")
-    #     print(f"B coefficients: b0={float(b0):.6f}, b1={float(b1):.6f}")
-    #     print(f"C coefficients: c0={float(c0):.6f}, c1={float(c1):.6f}, c2={float(c2):.6f}")
-    #     print(f"Market state mean: {np.mean(market_state):.6f}")
-    #     print(f"Current inventory mean: {np.mean(inventories):.6f}")
 
-    #     values = {}
-    #     for q in inventories_add:
-    #         inventory = inventories + q
-    #         B = (b0 + market_state * b1)
-    #         C = (c0 + market_state * c1 + market_state**2 * c2)
-    #         V = (inventory**2 * A + inventory * B + C)
-            
-    #         print(f"\nFor inventory level q={q}:")
-    #         print(f"B term mean: {np.mean(B):.6f}")
-    #         print(f"C term mean: {np.mean(C):.6f}")
-    #         print(f"Total value V mean: {np.mean(V):.6f}")
-            
-    #         values[q] = V
+    # Auxiliary functions
+    def _comp_A_explicit(self, t):
+        sqrt_big_phi = np.sqrt(self.big_phi)
+        call_kappa = 4 * (self.phi + self.psi) * np.exp(-1) * self.k
+        sqrt_call_kappa = np.sqrt(call_kappa)
+        beta = (sqrt_big_phi + sqrt_call_kappa * self.alpha)/ (sqrt_big_phi - sqrt_call_kappa * self.alpha)
 
-    #     return values
-
-
-    # def _comp_A_explicit(self, t: float):
-    #     """
-    #     Analytical solution of A' = -phi + c A^2 with A(T)=alpha,
-    #     c = 4 e^{-1} (phi+psi) k.
-    #     Uses the substitution v = kappa * A, kappa = sqrt(c/phi).
-    #     v(t) = tanh( atanh(kappa*alpha) + s*(T-t) ), s = sqrt(c*phi)
-    #     A = v / kappa.
-    #     Handles edge cases numerically if necessary.
-    #     """
-    #     phi = self.big_phi
-    #     psi = self.psi
-    #     k = self.k
-    #     alpha = self.alpha
-    #     T = self.terminal_time
-
-    #     # coefficient c
-    #     c = 4.0 * np.exp(-1.0) * (phi + psi) * k
-    #     # TODO maybe not even necessary to check this, since phi>0 in the model
-    #     # if phi or c nonpositive/zero, fallback to numeric integration
-    #     if phi <= 0 or c <= 0:
-    #         # fallback: integrate scalar ode quickly with solve_ivp
-    #         # (rare in practice since phi>0 in the model)
-    #         from scipy.integrate import solve_ivp
-    #         def rhs_A(tt, A): return -phi + c * A[0]**2
-    #         sol = solve_ivp(rhs_A, [T, t], [alpha], t_eval=[t], method="RK45")
-    #         if not sol.success:
-    #             raise RuntimeError("Scalar A ODE solver failed")
-    #         return float(sol.y[0, -1])
-
-    #     kappa = np.sqrt(c / phi)        # sqrt(c/phi)
-    #     s = np.sqrt(c * phi)            # sqrt(c*phi)
-
-    #     # numerical tolerance for atanh argument close to 1
-    #     arg = kappa * alpha
-    #     eps = 1e-12
-    #     # If |arg| >= 1 (or very near), handle numerically to avoid NaNs
-    #     if abs(arg) >= 1.0 - eps:
-    #         # integrate scalar ODE as fallback (robust)
-    #         from scipy.integrate import solve_ivp
-    #         def rhs_A(tt, A): return -phi + c * A[0]**2
-    #         sol = solve_ivp(rhs_A, [T, t], [alpha], t_eval=[t], method="RK45")
-    #         if not sol.success:
-    #             raise RuntimeError("Scalar A ODE solver failed")
-    #         return float(sol.y[0, -1])
-
-    #     # safe to use the analytic atanh/tanh formula
-    #     atanh_arg = np.arctanh(arg)  # numpy has arctanh alias
-    #     inner = atanh_arg + s * (T - t)
-    #     v = np.tanh(inner)
-    #     A = v / kappa
-    #     return float(A)
-
-    def _comp_A_explicit(self, t: float):
-        """
-        Analytical solution of A' = -phi + c A^2 with A(T)=alpha,
-        c = 4 e^{-1} (phi+psi) k.
-        Uses the substitution v = kappa * A, kappa = sqrt(c/phi).
-        v(t) = tanh( atanh(kappa*alpha) + s*(T-t) ), s = sqrt(c*phi)
-        A = v / kappa.
-        Handles edge cases numerically if necessary.
-        """
-        phi = self.big_phi
-        psi = self.psi
-        k = self.k
-        alpha = self.alpha
-        T = self.terminal_time
-
-        # coefficient c
-        c = 4.0 * np.exp(-1.0) * (phi + psi) * k
-         # TODO maybe not even necessary to check this, since phi>0 in the model
-        # if phi or c nonpositive/zero, fallback to numeric integration
-
-        # if phi or c nonpositive/zero, fallback to numeric integration
-        if phi <= 0 or c <= 0:
-            # fallback: integrate scalar ode quickly with solve_ivp
-            def rhs_A(tt, AA): 
-                return -phi + c * AA
-            sol = solve_ivp(rhs_A, [T, t], [alpha], t_eval=[t], method="RK45")
-            if not sol.success:
-                raise RuntimeError("Scalar A ODE solver failed")
-            return float(sol.y[0][0])  # Changed indexing here
-
-        kappa = np.sqrt(c / phi)        # sqrt(c/phi)
-        s = np.sqrt(c * phi)            # sqrt(c*phi)
-
-        # numerical tolerance for atanh argument close to 1
-        arg = kappa * alpha
-        eps = 1e-12
-        
-        # If |arg| >= 1 (or very near), handle numerically to avoid NaNs
-        if abs(arg) >= 1.0 - eps:
-            def rhs_A(tt, AA): 
-                return -phi + c * AA
-            sol = solve_ivp(rhs_A, [T, t], [alpha], t_eval=[t], method="RK45")
-            if not sol.success:
-                raise RuntimeError("Scalar A ODE solver failed")
-            return float(sol.y[0][0])  # Changed indexing here
-
-        # safe to use the analytic atanh/tanh formula
-        atanh_arg = np.arctanh(arg)
-        inner = atanh_arg + s * (T - t)
-        v = np.tanh(inner)
-        A = v / kappa
-        return float(A)
+        if np.isclose(sqrt_big_phi, sqrt_call_kappa * self.alpha):
+            return +self.alpha
+        else:
+            exp_term = np.exp(2 * sqrt_big_phi * sqrt_call_kappa * (self.terminal_time - t))
+            numerator = sqrt_big_phi * (1 - exp_term * beta)
+            denominator = sqrt_call_kappa * (1 + exp_term * beta)
+            return -numerator / denominator
 
     def _compute_B_rhs(self, t, B):
         """
@@ -1385,55 +1307,4 @@ class OptimizedPartialInfoMMwithFadsInformedUniformedTradersAgent(Agent):
             
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
-    
-    # # Keep the same auxiliary functions but remove the expensive solve_ivp calls
-    # def _comp_A_explicit(self, t):
-    #     """Same as before - already analytical"""
-    #     sqrt_big_phi = np.sqrt(self.big_phi)
-    #     call_kappa = 4 * (self.phi + self.psi) * np.exp(-1) * self.k
-    #     sqrt_call_kappa = np.sqrt(call_kappa)
-    #     beta = (sqrt_big_phi + sqrt_call_kappa * self.alpha)/ (sqrt_big_phi - sqrt_call_kappa * self.alpha)
-
-    #     if np.isclose(sqrt_big_phi, sqrt_call_kappa * self.alpha):
-    #         return -self.alpha
-    #     else:
-    #         exp_term = np.exp(2 * sqrt_big_phi * sqrt_call_kappa * (self.terminal_time - t))
-    #         numerator = sqrt_big_phi * (1 - exp_term * beta)
-    #         denominator = sqrt_call_kappa * (1 + exp_term * beta)
-    #         return numerator / denominator
-    
-    # def _compute_B_rhs(self, t, B):
-    #     """Same as before - used during precomputation only"""
-    #     A = self._comp_A_explicit(t)
-    #     b0, b1 = B
-
-    #     db0 = -self.mu - 4 * self.k * (self.psi + self.phi) * np.exp(-1) * A  * b0
-    #     db1 = (+ self.eta * self.sigma * self.fads_proportion + self.eta * b1
-    #             - 4 * (self.psi + self.phi) * np.exp(-1) * A * self.k * b1 
-    #             - 4 * np.exp(-1) * self.psi * self.fads_proportion * self.sigma * self.gamma * A 
-    #             - 4 * np.exp(-1) * self.k * self.gamma * self.fads_proportion * self.sigma * self.psi * A**2
-    #             )
-    #     return [db0, db1]
-
-    # def _compute_C_rhs(self, t, C, b0, b1):
-    #     """Same as before - used during precomputation only"""
-    #     A = self._comp_A_explicit(t)
-    #     c0, c1, c2 = C
-        
-    #     dc0 = (- c2 - (1 / self.k) * np.exp(-1) * 
-    #            (2 * (self.psi + self.phi) 
-    #         + 2 * self.k * A * (self.phi + self.psi) 
-    #         + self.k**2 * (self.phi + self.psi) * (A**2 + b0**2))
-    #             )
-    #     dc1 = + self.eta * c1 - (1 / self.k) * np.exp(-1) * (
-    #         2 * self.psi * self.k * self.sigma * self.gamma * self.fads_proportion * b0 
-    #         + self.k**2 * (self.phi + self.psi) * (2 * b0 * b1) +
-    #         2 * self.k**2 * self.psi * self.sigma * self.gamma * self.fads_proportion * A * b0
-    #     )
-    #     dc2 = 2 * self.eta * c2 - (1 / self.k) * np.exp(-1) * (
-    #         self.k**2 * (self.phi + self.psi) * b1**2 
-    #         + 2 * self.k**2 * self.psi * self.sigma * self.gamma * self.fads_proportion * A * b1
-    #         + 2 * self.psi * self.k * self.sigma * self.gamma * self.fads_proportion * b1
-    #     )
-        
-    #     return [dc0, dc1, dc2]
+ 

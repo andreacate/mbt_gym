@@ -217,12 +217,14 @@ class ModifiedPoissonArrivalModel(ArrivalModel):
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None):
         S_minus = -np.inf
         S_plus = +np.inf
-        informed_intensity_bid = self.psi * np.exp(-self.gamma * self.fads_proportion * self.sigma * np.maximum(state[:, FADS_INDEX], S_minus))
-        informed_intensity_ask = self.psi * np.exp(-self.gamma * self.fads_proportion * self.sigma * np.minimum(state[:, FADS_INDEX], S_plus))
+        informed_intensity_ask = self.psi * np.exp(-self.gamma *  np.maximum(self.fads_proportion * self.sigma * state[:, FADS_INDEX], S_minus))
+        informed_intensity_bid = self.psi * np.exp(+self.gamma *  np.minimum(self.fads_proportion * self.sigma * state[:, FADS_INDEX], S_plus))
         # Stack as columns to get shape (num_trajectories, 2)
         self.current_state = np.column_stack([self.phi + informed_intensity_bid, self.phi + informed_intensity_ask])
         return self.current_state
     
     def get_arrivals(self) -> np.ndarray:
         unif = self.rng.uniform(size=(self.num_trajectories, 2)) 
+        # print("current_state shape:", self.current_state.shape)
+        # print("current_state mean:", np.mean(self.current_state, axis=0))
         return unif < self.current_state * self.step_size

@@ -463,8 +463,8 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
         # --- Sampling: use standard normals for B and Z, then scale by sqrt(dt) where needed ---
         # draw two independent standard normals per trajectory:
         normals = self.rng.normal(size=(self.num_trajectories, 2))
-        Z = normals[:, 0]    # standard normal for Z
-        B = normals[:, 1]    # standard normal for B  (used for OU noise)
+        Z = normals[:, 0]   
+        B = normals[:, 1]   
 
         # OU exact update uses B directly (std_term already accounts for step)
         exp_term = np.exp(-self.eta * self.step_size)
@@ -498,10 +498,10 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
 class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceModel):
     def __init__(
         self,
-        drift: float = 0.0,  # μ in the paper
-        volatility: float = 1.0,  # σ in the paper  
-        fads_proportion: float = 0.8,  # correlation parameter between fad and price noise
-        eta: float = 10,  # fad mean reversion speed
+        drift: float = 0.0,  
+        volatility: float = 1.0,  
+        fads_proportion: float = 0.8,  
+        eta: float = 10, 
         initial_price: float = 100,
         initial_fad: float = 0,
         terminal_time: float = 1.0,
@@ -510,16 +510,15 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
         seed: Optional[int] = None,
         use_filtering: bool = True,  # Toggle between complete/partial information
     ):
-        self.drift = drift  # μ
-        self.volatility = volatility  # σ 
-        self.fads_proportion = fads_proportion # correlation parameter
-        self.eta = eta  # mean reversion speed
+        self.drift = drift  
+        self.volatility = volatility  
+        self.fads_proportion = fads_proportion 
+        self.eta = eta  
         self.terminal_time = terminal_time
         self.use_filtering = use_filtering
         
-        # Derived parameters from paper
-        self.p = np.sqrt(1 - self.fads_proportion**2)  # Independent noise coefficient
-        self.c = self.volatility  # Observation noise coefficient
+        self.p = np.sqrt(1 - self.fads_proportion**2)  
+        self.c = self.volatility  
    
         # Initialize filtering variables
         self.filtered_fad = None  # Û_t = E[U_t | F^S_t]
@@ -527,18 +526,18 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
         self.innovation_process = None  # I_t
         
         # State vector: [S_t, U_t, Û_t]
-        initial_filtered_fad = initial_fad  # Assume perfect initial information
+        initial_filtered_fad = initial_fad 
         
         super().__init__(
             min_value=np.array([[
-                initial_price - self._get_max_value(initial_price, terminal_time),  # S_t min
-                -10.0,  # U_t min (true fad)
-                -10.0   # Û_t min (filtered fad)
+                initial_price - self._get_max_value(initial_price, terminal_time), 
+                -10.0,  
+                -10.0   
             ]]),
             max_value=np.array([[
-                self._get_max_value(initial_price, terminal_time),  # S_t max
-                10.0,   # U_t max (true fad)
-                10.0    # Û_t max (filtered fad)
+                self._get_max_value(initial_price, terminal_time),  
+                10.0,   
+                10.0   
             ]]),
             step_size=step_size,
             terminal_time=terminal_time,
@@ -554,8 +553,8 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
     def _initialize_filtering(self):
         """Initialize the filtering components"""
         # Initialize filtered fad from state vector (3rd component)
-        self.conditional_variance = np.zeros(self.num_trajectories)  # P̂_0 = 0 (perfect initial info)
-        self.innovation_process = np.zeros(self.num_trajectories)  # I_0 = 0
+        self.conditional_variance = np.zeros(self.num_trajectories)  
+        self.innovation_process = np.zeros(self.num_trajectories) 
         
         # Pre-solve the Riccati equation for conditional variance
         self._solve_riccati_equation()
@@ -563,73 +562,111 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
     def _solve_riccati_equation(self):
         """Solve the Riccati equation (47) with numerical stability checks"""
         def riccati_ode(t, P):
-            # dP̂/dt = -η²q²P̂² - P̂(2η - 2ηq²) + p²
-            # Rewrite for numerical stability: dP̂/dt = p² - P̂(2η(1-q²)) - η²q²P̂²
+
             return self.p**2 - P * (2*self.eta*(1-self.fads_proportion**2)) - (self.eta**2 * self.fads_proportion**2) * P**2
         
         time_grid = np.arange(0, self.terminal_time + self.step_size, self.step_size)
         
-        # Use more robust integration with smaller tolerances
         sol = solve_ivp(
             riccati_ode, 
             [0, self.terminal_time], 
             [0], 
             t_eval=time_grid, 
             dense_output=True,
-            rtol=1e-8,  # Increased precision
+            rtol=1e-8,  
             atol=1e-10
         )
         
-        self.riccati_solution = sol.sol  # Store for interpolation during updates
-        
-        # Check for reasonable bounds - conditional variance should be bounded
         max_variance = sol.y[0].max()
         if max_variance > 100:  # Sanity check
             print(f"Warning: Large conditional variance detected: {max_variance}")
+       
+        self.riccati_solution = sol.sol  
 
+    # def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:       
+    #     time = state[:, TIME_INDEX]      
+    #     self.current_time = time[0]  
         
-        self.riccati_solution = sol.sol  # Store for interpolation during updates
+    #     # --- Sampling: use standard normals for B and Z, then scale by sqrt(dt) where needed ---
+    #     # draw two independent standard normals per trajectory:
+    #     normals = self.rng.normal(size=(self.num_trajectories, 2))
+    #     Z = normals[:, 0]    
+    #     B = normals[:, 1]    
+
+    #     # OU exact update 
+    #     exp_term = np.exp(-self.eta * self.step_size)
+    #     std_term = np.sqrt((1 - np.exp(-2 * self.eta * self.step_size)) / (2 * self.eta))
+
+    #     previous_fad = self.current_state[:, 1].copy()
+    #     # update true fad U_{t+dt}
+    #     self.current_state[:, 1] = previous_fad * exp_term + std_term * B
+
+    #     # Build correlated Brownian increment dW_tilde of order sqrt(dt):
+    #     # dW_tilde = ( p * dZ + q * dB ), where dZ = Z * sqrt(dt), dB = B * sqrt(dt)
+    #     sqrt_dt = np.sqrt(self.step_size)
+    #     dZ_inc = Z * sqrt_dt
+    #     dB_inc = B * sqrt_dt
+    #     dW_tilde = self.p * dZ_inc + self.fads_proportion * dB_inc
+
+    #     # --- Update midprice S_t (observable):
+    #     # dS_t = h(U_t) * dt + c * dW_tilde, with h(U)=mu - eta*q*sigma*U
+    #     drift_contribution = (self.drift - self.eta * self.fads_proportion * self.volatility * previous_fad) * self.step_size
+    #     noise_contribution = self.c * dW_tilde 
+
+    #     self.current_state[:, 0] = self.current_state[:, 0] + drift_contribution + noise_contribution
+             
+    #     # --- Update filtered fad Û_t (3rd component) ---
+    #     if self.use_filtering:
+    #         self._update_filtering(drift_contribution, noise_contribution)
+    #     else:
+    #         # Complete information: filtered fad equals true fad
+    #         self.current_state[:, 2] = self.current_state[:, 1]
+            
+    #     return self.current_state
 
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:       
         time = state[:, TIME_INDEX]      
-        self.current_time = time[0]  # Use first element since all are the same
+        self.current_time = time[0]  
         
-        # --- Sampling: use standard normals for B and Z, then scale by sqrt(dt) where needed ---
-        # draw two independent standard normals per trajectory:
         normals = self.rng.normal(size=(self.num_trajectories, 2))
-        Z = normals[:, 0]    # standard normal for Z
-        B = normals[:, 1]    # standard normal for B  (used for OU noise)
+        Z = normals[:, 0]    
+        B = normals[:, 1]    
 
-        # OU exact update uses B directly (std_term already accounts for step)
-        exp_term = np.exp(-self.eta * self.step_size)
-        std_term = np.sqrt((1 - np.exp(-2 * self.eta * self.step_size)) / (2 * self.eta))
-
-        previous_fad = self.current_state[:, 1].copy()
-        # update true fad U_{t+dt}
-        self.current_state[:, 1] = previous_fad * exp_term + std_term * B
-
-        # Build correlated Brownian increment dW_tilde of order sqrt(dt):
-        # dW_tilde = ( p * dZ + q * dB ), where dZ = Z * sqrt(dt), dB = B * sqrt(dt)
         sqrt_dt = np.sqrt(self.step_size)
         dZ_inc = Z * sqrt_dt
         dB_inc = B * sqrt_dt
-        dW_tilde = self.p * dZ_inc + self.fads_proportion * dB_inc  # this is O(sqrt(dt))
 
-        # --- Update midprice S_t (observable):
-        # dS_t = h(U_t) * dt + c * dW_tilde, with h(U)=mu - eta*q*sigma*U
-        drift_contribution = (self.drift - self.eta * self.fads_proportion * self.volatility * previous_fad) * self.step_size
-        noise_contribution = self.c * dW_tilde  # already scaled by sqrt(dt)
+        previous_fad = self.current_state[:, 1].copy()
 
-        self.current_state[:, 0] = self.current_state[:, 0] + drift_contribution + noise_contribution
-
-        
-        # --- Update filtered fad Û_t (3rd component) ---
-        if self.use_filtering:
-            self._update_filtering(drift_contribution, noise_contribution)
+        if self.fads_proportion == 0.0:
+            # --- No fad dynamics ---
+            self.current_state[:, 1] = 0.0  
+            dW_tilde = dZ_inc               
+            drift_contribution = self.drift * self.step_size
         else:
-            # Complete information: filtered fad equals true fad
+            # --- OU update for fad ---
+            exp_term = np.exp(-self.eta * self.step_size)
+            std_term = np.sqrt((1 - np.exp(-2 * self.eta * self.step_size)) / (2 * self.eta))
+            self.current_state[:, 1] = previous_fad * exp_term + std_term * B
+
+            # Build correlated Brownian increment
+            dW_tilde = self.p * dZ_inc + self.fads_proportion * dB_inc
+
+            # Drift depends on fad
+            drift_contribution = (self.drift - self.eta * self.fads_proportion * self.volatility * previous_fad) * self.step_size
+
+        noise_contribution = self.c * dW_tilde 
+        self.current_state[:, 0] = self.current_state[:, 0] + drift_contribution + noise_contribution
+                
+        # --- Update filtered fad ---
+        if self.use_filtering:
+            if self.fads_proportion > 0.0:
+                self._update_filtering(drift_contribution, noise_contribution)
+            else:
+                self.current_state[:, 2] = 0.0  # no fad to filter
+        else:
             self.current_state[:, 2] = self.current_state[:, 1]
-            
+
         return self.current_state
 
     def _update_filtering(self, expected_drift: np.ndarray, observed_noise: np.ndarray):
@@ -668,15 +705,15 @@ class ArithmeticBrownianMotionWithFadsMidpriceModelPartialInformation(MidpriceMo
     def get_filtered_state(self) -> np.ndarray:
         """Return the state available to partial info agent: [S_t, Û_t]"""
         return np.column_stack([
-            self.current_state[:, 0],  # Observable midprice S_t
-            self.current_state[:, 2]   # Filtered fad estimate Û_t (3rd component)
+            self.current_state[:, 0],  
+            self.current_state[:, 2]   
         ])
     
     def get_complete_info_state(self) -> np.ndarray:
         """Return the state available to complete info agent: [S_t, U_t]"""
         return np.column_stack([
-            self.current_state[:, 0],  # Observable midprice S_t  
-            self.current_state[:, 1]   # True fad U_t (2nd component)
+            self.current_state[:, 0],  
+            self.current_state[:, 1]   
         ])
     
     def get_true_state(self) -> np.ndarray:
