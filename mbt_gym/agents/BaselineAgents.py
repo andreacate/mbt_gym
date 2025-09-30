@@ -64,6 +64,39 @@ class AvellanedaStoikovAgent(Agent):
         assert isinstance(self.env, TradingEnvironment)
         self.terminal_time = self.env.terminal_time
         self.volatility = self.env.model_dynamics.midprice_model.volatility
+        self.rate_of_arrival = self.env.model_dynamics.arrival_model.intensity
+        self.fill_exponent = self.env.model_dynamics.fill_probability_model.fill_exponent
+
+    def get_action(self, state: np.ndarray):
+        inventory = state[:, INVENTORY_INDEX]
+        time = state[:, TIME_INDEX]
+        action = self._get_action(inventory, time)
+        if action.min() < 0:
+            warnings.warn("Avellaneda-Stoikov agent is quoting a negative spread")
+        return action
+
+    def _get_price_adjustment(self, inventory: int, time: float) -> float:
+        return inventory * self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
+
+    def _get_spread(self, time: float) -> float:
+        if self.risk_aversion == 0:
+            return 2 / self.fill_exponent  # Limit as risk aversion -> 0
+        volatility_aversion_component = self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
+        fill_exponent_component = 2 / self.risk_aversion * np.log(1 + self.risk_aversion / self.fill_exponent)
+        return volatility_aversion_component + fill_exponent_component
+
+    def _get_action(self, inventory: int, time: float):
+        bid_half_spread = (self._get_price_adjustment(inventory, time) + self._get_spread(time) / 2).reshape(-1, 1)
+        ask_half_spread = (-self._get_price_adjustment(inventory, time) + self._get_spread(time) / 2).reshape(-1, 1)
+        return np.append(bid_half_spread, ask_half_spread, axis=1)
+    
+class ModifiedAvellanedaStoikovAgent(Agent):
+    def __init__(self, risk_aversion: float = 0.1, env: TradingEnvironment = None):
+        self.risk_aversion = risk_aversion
+        self.env = env or TradingEnvironment()
+        assert isinstance(self.env, TradingEnvironment)
+        self.terminal_time = self.env.terminal_time
+        self.volatility = self.env.model_dynamics.midprice_model.volatility
         arrival_model = self.env.model_dynamics.arrival_model
         self.rate_of_arrival = (
             getattr(arrival_model, "intensity", None)
@@ -88,9 +121,10 @@ class AvellanedaStoikovAgent(Agent):
     def _get_spread(self, time: float) -> float:
         if self.risk_aversion == 0:
             return 2 / self.fill_exponent  # Limit as risk aversion -> 0
-        volatility_aversion_component = self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
-        fill_exponent_component = 2 / self.risk_aversion * np.log(1 + self.risk_aversion / self.fill_exponent) #3.12 equation
-        # volatility_aversion_component = 0
+        # the volatility component is already considered inside the _get_price_adjustment, so I just set to 0 since otherwise I will consider twice
+        #volatility_aversion_component = self.risk_aversion * self.volatility**2 * (self.terminal_time - time)
+        volatility_aversion_component = 0
+        fill_exponent_component = 2 / self.risk_aversion * np.log(1 + self.risk_aversion / self.fill_exponent) #3.12 equation   
         return volatility_aversion_component + fill_exponent_component
 
     def _get_action(self, inventory: int, time: float):
