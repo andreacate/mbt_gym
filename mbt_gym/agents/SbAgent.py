@@ -17,10 +17,14 @@ class SbAgent(Agent):
             self.reduced_training = False
 
     def get_action(self, state: np.ndarray) -> np.ndarray:
-        if self.reduced_training:
-            state = state[:, self.reduced_training_indices]
+        # if self.reduced_training:
+        #     state = state[:, self.reduced_training_indices]
         # return self.model.predict(state, deterministic=True)[0].reshape(self.num_trajectories, self.num_actions)
+        #print("state dim", state.shape[0])
         return self.model.predict(state, deterministic=True)[0].reshape(state.shape[0], self.num_actions)
 
     def train(self, total_timesteps: int = 100000):
         self.model.learn(total_timesteps=total_timesteps)
+
+    def get_state(self):
+        return self.model.policy.state_dict() 
