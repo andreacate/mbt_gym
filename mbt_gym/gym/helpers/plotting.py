@@ -6,8 +6,8 @@ import pandas as pd
 import seaborn as sns
 
 from mbt_gym.agents.Agent import Agent
-from mbt_gym.agents.SbAgent import SbAgent
 from mbt_gym.gym.TradingEnvironment import TradingEnvironment 
+from mbt_gym.agents.SbAgent import SbAgent
 from mbt_gym.gym.index_names import CASH_INDEX, INVENTORY_INDEX, ASSET_PRICE_INDEX, FADS_INDEX, FILTERED_FADS_INDEX
 from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory, generate_trajectory_rl
 
@@ -166,7 +166,7 @@ def plot_trajectory_extended(env: gym.Env, agent: Agent, seed: int = None):
 
 
 def plot_trajectory(env: gym.Env, agent: Agent, seed: int = None):
-    """Original plotting function - kept for backward compatibility"""
+    
     # assert env.num_trajectories == 1, "Plotting a trajectory can only be done when env.num_trajectories == 1."
     timestamps = get_timestamps(env)
     observations, actions, rewards = generate_trajectory(env, agent, seed)
@@ -293,14 +293,20 @@ def get_timestamps(env: gym.Env):
         return np.linspace(0, terminal_time, n_steps + 1)
 
 
-def plot_rl_trajectory_extended(env: gym.Env, agent: SbAgent, seed: int = None):
+def plot_rl_trajectory_extended(env: gym.Env, agent: SbAgent, use_normalized_agent: bool = False, seed: int = None):
     """
     Enhanced trajectory plotting specifically for RL agents that includes
     policy state information and neural network activations.
     """
+
+    print("Generating RL trajectory plot...")
+    print("env.observation_space:", env.observation_space)
+    print("env.action_space:", env.action_space)
+    #print("env.normalise_observation_space:", env.normalise_observation_space)
+    #print("env.normalise_action_space:", env.normalise_action_space)
     # Generate trajectory data
     timestamps = get_timestamps(env)
-    observations, actions, rewards = generate_trajectory_rl(env, agent, seed)
+    observations, actions, rewards = generate_trajectory_rl(env, agent, use_normalized_agent=use_normalized_agent, seed=seed)
     action_dim = actions.shape[1]
     state_dim = observations.shape[1]
     
@@ -426,9 +432,6 @@ def plot_rl_trajectory_extended(env: gym.Env, agent: SbAgent, seed: int = None):
         for process_name, (start_idx, end_idx) in env.stochastic_process_indices.items():
             if end_idx <= start_idx or ax_idx >= len(axes):
                 continue  # Skip processes with no dimensions or if we run out of subplots
-            print("Process name", process_name)
-            print("Start idx", start_idx)
-            print("End idx", end_idx)
             axes[ax_idx].set_title(f"{process_name.replace('_', ' ').title()}")
             
             # Plot each dimension of this stochastic process
@@ -479,9 +482,10 @@ def plot_rl_trajectory_extended(env: gym.Env, agent: SbAgent, seed: int = None):
         
     plt.tight_layout()
     plt.show()
+    return fig
 
 
-def generate_results_table_and_hist_rl(vec_env: TradingEnvironment, rl_agent: SbAgent, n_episodes: int = 1000):
+def generate_results_table_and_hist_rl(vec_env: TradingEnvironment, rl_agent: SbAgent, use_normalized_agent: bool = False, n_episodes: int = 1000):
     """
     Generate results table and histogram for RL agents that require observation transformation.
     
@@ -498,7 +502,7 @@ def generate_results_table_and_hist_rl(vec_env: TradingEnvironment, rl_agent: Sb
     assert vec_env.num_trajectories > 1, "To generate a results table and hist, vec_env must roll out > 1 trajectory."
     
     # Use the RL-specific trajectory generator
-    observations, actions, rewards = generate_trajectory_rl(vec_env, rl_agent)
+    observations, actions, rewards = generate_trajectory_rl(vec_env, rl_agent, use_normalized_agent=use_normalized_agent)
     
     total_rewards = rewards.sum(axis=-1).reshape(-1)
     terminal_inventories = observations[:, INVENTORY_INDEX, -1]
