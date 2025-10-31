@@ -8,7 +8,7 @@ from mbt_gym.stochastic_processes.StochasticProcessModel import StochasticProces
 
 MidpriceModel = StochasticProcessModel
 
-from mbt_gym.gym.index_names import BID_INDEX, ASK_INDEX, TIME_INDEX
+from mbt_gym.gym.index_names import BID_INDEX, ASK_INDEX, TIME_INDEX, INVENTORY_INDEX
 
 class ConstantMidpriceModel(MidpriceModel):
     def __init__(
@@ -501,6 +501,9 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
     def update(self, arrivals: np.ndarray, fills: np.ndarray, actions: np.ndarray, state: np.ndarray = None) -> np.ndarray:       
         time = state[:, TIME_INDEX]      
         self.current_time = time[0]  
+        # print("Current time:", self.current_time)
+        # if self.current_time == 0.001:
+        #     print(state[:, INVENTORY_INDEX])
         
         normals = self.rng.normal(size=(self.num_trajectories, 2))
         Z = normals[:, 0]    

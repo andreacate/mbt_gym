@@ -41,6 +41,8 @@ class StochasticProcessModel(metaclass=abc.ABCMeta):
     def _check_attribute_shapes(self):
         for name in ["initial_state", "min_value", "max_value"]:
             attribute = getattr(self, name)
+#            print(f"Checking shape of attribute {name}: {attribute.shape}")
+#            print("attribute", attribute )
             assert (
                 len(attribute.shape) == 2 and attribute.shape[0] == 1
             ), f"Attribute {name} must be a vector of shape (1, state_size)."

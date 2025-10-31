@@ -205,8 +205,8 @@ class ModifiedPoissonArrivalModel(ArrivalModel):
 
 
         super().__init__(
-            min_value=np.array([[]]),
-            max_value=np.array([[]]),
+            min_value=np.array([[0.0, 0.0]]),
+            max_value=np.array([[60.0, 60.0]]),
             step_size=step_size,
             terminal_time=0.0,
             initial_state=initial_state,
