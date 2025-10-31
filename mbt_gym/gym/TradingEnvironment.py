@@ -12,7 +12,7 @@ from mbt_gym.agents.Agent import Agent
 from mbt_gym.gym.ModelDynamics import ModelDynamics, LimitOrderModelDynamics
 from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory
 from mbt_gym.stochastic_processes.StochasticProcessModel import StochasticProcessModel
-from mbt_gym.stochastic_processes.arrival_models import ArrivalModel, PoissonArrivalModel, HawkesArrivalModel
+from mbt_gym.stochastic_processes.arrival_models import ArrivalModel, PoissonArrivalModel, HawkesArrivalModel, ModifiedPoissonArrivalModel
 from mbt_gym.stochastic_processes.fill_probability_models import FillProbabilityModel, ExponentialFillFunction
 from mbt_gym.stochastic_processes.midprice_models import MidpriceModel, BrownianMotionMidpriceModel
 from mbt_gym.stochastic_processes.price_impact_models import PriceImpactModel
@@ -83,18 +83,24 @@ class TradingEnvironment(gym.Env):
         self.normalise_action_space_ = normalise_action_space
         self.normalise_observation_space_ = normalise_observation_space
         self.normalise_rewards_ = normalise_rewards
-        if self.normalise_observation_space_:
-            self.original_observation_space = copy(self.observation_space)
+        self.original_observation_space = copy(self.observation_space)
+        if self.normalise_observation_space_:            
             self.observation_space = self._get_normalised_observation_space()
-        if self.normalise_action_space_:
-            self.original_action_space = copy(self.action_space)
+        self.original_action_space = copy(self.action_space)
+        if self.normalise_action_space_:           
             self.action_space = self._get_normalised_action_space()
+        # if self.normalise_rewards_:
+        #     assert isinstance(self.model_dynamics.arrival_model, PoissonArrivalModel) and isinstance(
+        #         self.model_dynamics.fill_probability_model, ExponentialFillFunction
+        #     ), "Arrival model must be Poisson and fill probability model must be exponential to scale rewards"
+        #     self.reward_scaling = 1 / self._get_inventory_neutral_rewards()
+        # self.render_mode = render_mode
         if self.normalise_rewards_:
-            assert isinstance(self.model_dynamics.arrival_model, PoissonArrivalModel) and isinstance(
-                self.model_dynamics.fill_probability_model, ExponentialFillFunction
-            ), "Arrival model must be Poisson and fill probability model must be exponential to scale rewards"
+            assert (
+                isinstance(self.model_dynamics.arrival_model, (PoissonArrivalModel, ModifiedPoissonArrivalModel))
+                and isinstance(self.model_dynamics.fill_probability_model, ExponentialFillFunction)
+            ), "Arrival model must be Poisson (or ModifiedPoisson) and fill probability model must be exponential to scale rewards"
             self.reward_scaling = 1 / self._get_inventory_neutral_rewards()
-        self.render_mode = render_mode
 
     def reset(self):
         for process in self.stochastic_processes.values():
@@ -104,7 +110,9 @@ class TradingEnvironment(gym.Env):
         return self.normalise_observation(self.model_dynamics.state.copy())
 
     def step(self, action: np.ndarray):
+        #print("Original action", action)
         action = self.normalise_action(action, inverse=True)
+        #print("Denormalised action", action)
         current_state = self.model_dynamics.state.copy()
         next_state = self._update_state(action)
         dones = self._get_dones()
@@ -112,19 +120,85 @@ class TradingEnvironment(gym.Env):
         infos = self._calculate_infos(current_state, action, rewards)
         return self.normalise_observation(next_state.copy()), self.normalise_rewards(rewards), dones, infos
 
-    def normalise_observation(self, obs: np.ndarray, inverse: bool = False):
-        if self.normalise_observation_space_ and not inverse:
+#     def normalise_observation(self, obs: np.ndarray, inverse: bool = False, normalise_observation_space_: bool = False):
+# #        print("obs", obs.shape)
+# #        print("normalise_observation_space_", self.normalise_observation_space_)
+# #        print("self._intercept_obs_norm", self._intercept_obs_norm.shape)
+# #        print("self._gradient_obs_norm", self._gradient_obs_norm.shape)
+# #        print("obs", obs[0:10])
+# #        print("self._intercept_obs_norm", self._intercept_obs_norm)
+# #        print("self._gradient_obs_norm", self._gradient_obs_norm)
+#         if self.normalise_observation_space_ and not inverse:
+#             print("Normalising observation", obs[0:10])
+#             return (obs - self._intercept_obs_norm) / self._gradient_obs_norm - 1
+#         elif self.normalise_observation_space_ and inverse:
+#             print("Denormalising observation", obs[0:10])
+#             return (obs + 1) * self._gradient_obs_norm + self._intercept_obs_norm
+#         else:
+#             print("No normalisation applied", obs[0:10])
+#             return obs
+
+    def normalise_observation(self, obs: np.ndarray, inverse: bool = False, force: bool = False):
+        """
+        Normalize or denormalize observations.
+
+        Parameters
+        ----------
+        obs : np.ndarray
+            The observations.
+        inverse : bool, optional
+            If True, denormalize; otherwise normalize.
+        force : bool, optional
+            If True, apply normalization regardless of self.normalise_observation_space_.
+        """
+        apply_norm = self.normalise_observation_space_ or force
+
+        if apply_norm and not inverse:
+            #print("Normalising observation", obs[0:10])
             return (obs - self._intercept_obs_norm) / self._gradient_obs_norm - 1
-        elif self.normalise_observation_space_ and inverse:
+        elif apply_norm and inverse:
+            #print("Denormalising observation", obs[0:10])
             return (obs + 1) * self._gradient_obs_norm + self._intercept_obs_norm
         else:
+            #print("No normalisation applied", obs[0:10])
             return obs
 
-    def normalise_action(self, action: np.ndarray, inverse: bool = False):
-        # print("Action before normalisation:", action)
-        if self.normalise_action_space_ and not inverse:
+    # def normalise_action(self, action: np.ndarray, inverse: bool = False):
+    #     #print("action", action)
+    #     #print("After normalisation", (action - self._intercept_action_norm) / self._gradient_action_norm - 1)
+    #     #print("After denormalisation", (action + 1) * self._gradient_action_norm + self._intercept_action_norm)
+
+    #     print("self.normalise_action_space_", self.normalise_action_space_)
+    #     if self.normalise_action_space_ and not inverse:
+    #         print("Normalising action", action)
+    #         print("Normalised action", (action - self._intercept_action_norm) / self._gradient_action_norm - 1)
+    #         return (action - self._intercept_action_norm) / self._gradient_action_norm - 1
+    #     elif self.normalise_action_space_ and inverse:
+    #         print("Denormalising action", action)
+    #         return (action + 1) * self._gradient_action_norm + self._intercept_action_norm
+    #     else:
+    #         print("No normalisation applied", action)
+    #         return action
+    def normalise_action(self, action: np.ndarray, inverse: bool = False, force: bool = False):
+        """
+        Normalize or denormalize actions.
+
+        Parameters
+        ----------
+        action : np.ndarray
+            The actions.
+        inverse : bool, optional
+            If True, denormalize; otherwise normalize.
+        force : bool, optional
+            If True, apply normalization regardless of self.normalise_action_space_.
+        """
+        apply_norm = self.normalise_action_space_ or force
+
+        if apply_norm and not inverse:
+            # Normalize action to [-1, 1]
             return (action - self._intercept_action_norm) / self._gradient_action_norm - 1
-        elif self.normalise_action_space_ and inverse:
+        elif apply_norm and inverse:
+            # Denormalize action back to real-world scale
             return (action + 1) * self._gradient_action_norm + self._intercept_action_norm
         else:
             return action
@@ -191,10 +265,13 @@ class TradingEnvironment(gym.Env):
 
     @property
     def _intercept_action_norm(self):
+        #print(f"[_intercept_action_norm] original action_space.low.shape={self.original_action_space.low.shape}, low_sample={self.original_action_space.low}")
         return self.original_action_space.low
 
     @property
     def _gradient_action_norm(self):
+        #print(f"[_gradient_action_norm] original action_space.high.shape={self.original_action_space.high.shape}, high_sample={self.original_action_space.high}")
+        #print("gradient_action_norm calculation:", (self.original_action_space.high - self.original_action_space.low) / 2)
         return (self.original_action_space.high - self.original_action_space.low) / 2
 
     # state[0]=cash, state[1]=inventory, state[2]=time, state[3] = asset_price, and then remaining states depend on
@@ -240,15 +317,23 @@ class TradingEnvironment(gym.Env):
     def _get_max_cash(self) -> float:
         return self.n_steps * self.max_stock_price  # TODO: make this a tighter bound
 
+    # To adjust this function!
     def _get_observation_space(self) -> gym.spaces.Space:
         """The observation space consists of a numpy array containg the agent's cash, the agent's inventory and the
         current time. It also contains the states of the arrival model, the midprice model and the fill probability
         model in that order."""
         low = np.array([-self.max_cash, -self.max_inventory, 0])
         high = np.array([self.max_cash, self.max_inventory, self.terminal_time])
+#        print("low", low)
+#        print("high", high)
         for process in self.stochastic_processes.values():
+#            print("process", process)
+#            print("process.min_value", process.min_value)
             low = np.append(low, process.min_value)
+#            print("low after append", low)
+#            print("process.max_value", process.max_value)
             high = np.append(high, process.max_value)
+#            print("high after append", high)
         return Box(low=np.float32(low), high=np.float32(high))
 
     def _get_normalised_observation_space(self):
@@ -260,8 +345,11 @@ class TradingEnvironment(gym.Env):
 
     def _get_normalised_action_space(self):
         # Linear normalisation of the gym.Box space so that the domain of the action space is [-1,1].
+        #print("Before normalization self.action_space.low", self.action_space.low)
+        #print("Before normalization self.action_space.high", self.action_space.high)
         return gym.spaces.Box(
             low=-np.ones_like(self.action_space.low, dtype=np.float32),
+            #low=np.zeros_like(self.action_space.low, dtype=np.float32),
             high=np.ones_like(self.action_space.high, dtype=np.float32),
         )
 
