@@ -6,8 +6,13 @@ from mbt_gym.gym.index_names import INVENTORY_INDEX, TIME_INDEX
 
 from math import sqrt
 
+# forward attribute/method lookup to the wrapped env for anything not defined on the wrapper
+class AttrForwardWrapper(gym.Wrapper):
+    def __getattr__(self, name):
+        # Called only if attribute 'name' is not found on the wrapper instance itself
+        return getattr(self.env, name)
 
-class ReduceStateSizeWrapper(gym.Wrapper):
+class ReduceStateSizeWrapper(AttrForwardWrapper):
     """
     :param env: (gym.Env) Gym environment that will be wrapped
     """
@@ -22,7 +27,9 @@ class ReduceStateSizeWrapper(gym.Wrapper):
             dtype=np.float64,
         )
         self.list_of_state_indices = list_of_state_indices
-        self.num_trajectories = env.num_trajectories
+        #self.num_trajectories = env.num_trajectories
+        #self.n_steps = env.n_steps
+        #self.normalise_action_space_ = env.normalise_action_space_
 
     def reset(self):
         """
@@ -44,7 +51,7 @@ class ReduceStateSizeWrapper(gym.Wrapper):
         return self.env.spec
 
 
-class NormaliseASObservation(gym.Wrapper):
+class NormaliseASObservation(AttrForwardWrapper):
     """
     :param env: (gym.Env) Gym environment that will be wrapped
     """
@@ -60,6 +67,8 @@ class NormaliseASObservation(gym.Wrapper):
             high=np.ones(env.observation_space.shape),
             dtype=np.float64,
         )
+        #self.num_trajectories = env.num_trajectories
+        #self.n_steps = env.n_steps
 
     def reset(self):
         """
@@ -74,10 +83,11 @@ class NormaliseASObservation(gym.Wrapper):
         :return: (np.ndarray, float, bool, dict) observation, reward, is the episode over?, additional informations
         """
         obs, reward, done, info = self.env.step(action)
-        return obs / self.normalisation_factor, reward, done, info
+        #return obs / self.normalisation_factor, reward, done, info
+        return (obs - self.normalisation_offset) * self.normalisation_factor, reward, done, info
 
 
-class RemoveTerminalRewards(gym.Wrapper):
+class RemoveTerminalRewards(AttrForwardWrapper):
     """
     :param env: (gym.Env) Gym environment that will be wrapped
     """
