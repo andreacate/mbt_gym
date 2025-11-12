@@ -143,7 +143,7 @@ class RunningInventoryPenalty(RewardFunction):
 
 # Cartea and Jaimungal criterion is the same as inventory adjusted PnL
 
-CjCriterion = RunningInventoryPenalty
+#CjCriterion = RunningInventoryPenalty
 
 
 class ExponentialUtility(RewardFunction):

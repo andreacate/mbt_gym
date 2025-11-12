@@ -43,6 +43,7 @@ class TradingEnvironment(gym.Env):
         normalise_action_space: bool = True,
         normalise_observation_space: bool = True,
         normalise_rewards: bool = False,
+        random_start: bool = False,
         render_mode: str = None,      
     ):
         super(TradingEnvironment, self).__init__()
@@ -101,12 +102,33 @@ class TradingEnvironment(gym.Env):
                 and isinstance(self.model_dynamics.fill_probability_model, ExponentialFillFunction)
             ), "Arrival model must be Poisson (or ModifiedPoisson) and fill probability model must be exponential to scale rewards"
             self.reward_scaling = 1 / self._get_inventory_neutral_rewards()
+        self.random_start = random_start
+        self._start_time_sampler = None
+        if self.random_start:
+            self._start_time_sampler = self._make_random_start_time_sampler(self.terminal_time)
 
+    # def reset(self):
+    #     for process in self.stochastic_processes.values():
+    #         process.reset()
+    #     self.model_dynamics.state = self.initial_state
+    #     self.reward_function.reset(self.model_dynamics.state.copy())
+    #     return self.normalise_observation(self.model_dynamics.state.copy())
+    
     def reset(self):
+        # Sample random start time if enabled
+        if self.random_start and self._start_time_sampler is not None:
+            self.start_time = self._start_time_sampler()
+        
+        # Reset all stochastic processes
         for process in self.stochastic_processes.values():
             process.reset()
+        
+        # Initialize state with the potentially updated start_time
         self.model_dynamics.state = self.initial_state
+        
+        # Reset reward function
         self.reward_function.reset(self.model_dynamics.state.copy())
+        
         return self.normalise_observation(self.model_dynamics.state.copy())
 
     def step(self, action: np.ndarray):
@@ -203,8 +225,24 @@ class TradingEnvironment(gym.Env):
         else:
             return action
 
+    # def normalise_rewards(self, rewards: np.ndarray):
+    #     return self.reward_scaling * rewards if self.normalise_rewards_ else rewards
+
     def normalise_rewards(self, rewards: np.ndarray):
-        return self.reward_scaling * rewards if self.normalise_rewards_ else rewards
+        """
+        Normalize reward by the effective episode duration (T - start_time)
+        to avoid bias from variable-length simulations when using random start times.
+        """
+        # Apply reward scaling first
+        scaled_reward = self.reward_scaling * rewards if self.normalise_rewards_ else rewards
+
+        # Compute effective episode length in simulation time
+        if hasattr(self, "start_time") and hasattr(self, "terminal_time"):
+            effective_length = max(self.terminal_time - self.start_time, 1e-8)
+            #print(f"Effective episode length: {effective_length}")
+
+        normalized_reward = scaled_reward / effective_length
+        return normalized_reward
 
     @property
     def initial_state(self) -> np.ndarray:
@@ -445,3 +483,29 @@ class TradingEnvironment(gym.Env):
         self.rng = np.random.default_rng(seed)
         for i, process in enumerate(self.stochastic_processes.values()):
             process.seed(seed + i + 1)
+
+
+    def _make_random_start_time_sampler(self, terminal_time: float):
+        """
+        Returns a callable that samples an initial time according to:
+        - with probability 0.5: uniform in [0, 0.8 * T]
+        - with probability 0.5: uniform in [0.8 * T, 0.99 * T]
+        
+        Parameters
+        ----------
+        terminal_time : float
+            The terminal time T of the episode.
+        
+        Returns
+        -------
+        callable
+            A function that samples and returns a random start time.
+        """
+        def _sample_start_time():
+            if np.random.rand() < 0.5:
+                # 50% chance: early part of episode
+                return np.random.uniform(0.0, 0.8 * terminal_time)
+            else:
+                # 50% chance: near the end of episode
+                return np.random.uniform(0.8 * terminal_time, 0.99 * terminal_time)
+        return _sample_start_time
