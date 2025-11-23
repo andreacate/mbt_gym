@@ -88,7 +88,7 @@ class HawkesArrivalModel(ArrivalModel):
     def __init__(
         self,
         baseline_arrival_rate: np.ndarray = np.array([[10.0, 10.0]]),
-        step_size: float = 0.01,
+        step_size: float = 0.001,
         jump_size: float = 40.0,
         mean_reversion_speed: float = 60.0,
         terminal_time: float = 1,

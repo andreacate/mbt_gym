@@ -625,7 +625,7 @@ class ArithmeticBrownianMotionWithFadsMidpriceModel(MidpriceModel):
 
 
 ##########################################################
-# A variant of the above model that without filtering
+# A variant of the above model without filtering
 class ArithmeticBrownianMotionWithFadsMidpriceModelNoFilteredFad(MidpriceModel):
     def __init__(
         self,
