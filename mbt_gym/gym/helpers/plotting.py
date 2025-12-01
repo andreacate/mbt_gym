@@ -9,7 +9,7 @@ from mbt_gym.agents.Agent import Agent
 from mbt_gym.gym.TradingEnvironment import TradingEnvironment 
 from mbt_gym.agents.SbAgent import SbAgent
 from mbt_gym.gym.index_names import CASH_INDEX, INVENTORY_INDEX, ASSET_PRICE_INDEX, FADS_INDEX, FILTERED_FADS_INDEX
-from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory, generate_trajectory_rl
+from mbt_gym.gym.helpers.generate_trajectory import generate_trajectory, generate_trajectory_rl, generate_trajectory_rl_fast
 
 
 def plot_trajectory_extended(env: gym.Env, agent: Agent, seed: int = None):
@@ -515,10 +515,27 @@ def generate_results_table_and_hist_rl(vec_env: TradingEnvironment, rl_agent: Sb
     results.loc[:, "Mean spread"] = 2 * np.mean(half_spreads)
     results.loc["RL Agent", "Mean PnL"] = np.mean(total_rewards)
     results.loc["RL Agent", "Std PnL"] = np.std(total_rewards)
-    results.loc["RL Agent", "Mean terminal inventory"] = np.mean(terminal_inventories)
+    results.loc["RL Agent", "Mean terminal inventory"] = np.mean(terminal_inventories)  
     results.loc["RL Agent", "Std terminal inventory"] = np.std(terminal_inventories)
     
     # Create PnL histogram
     fig = plot_pnl(total_rewards)
     
+    return results, fig, total_rewards
+
+def generate_results_table_and_hist_rl_fast(vec_env: TradingEnvironment, rl_agent: SbAgent, use_normalized_agent: bool = False, n_episodes: int = 1000):
+    
+    total_rewards, terminal_inventory, mean_spread = generate_trajectory_rl_fast(
+        vec_env, rl_agent, use_normalized_agent=use_normalized_agent)
+
+    results = pd.DataFrame({
+        "Mean spread": [np.mean(mean_spread)],
+        "Mean PnL": [np.mean(total_rewards)],
+        "Std PnL": [np.std(total_rewards)],
+        "Mean terminal inventory": [np.mean(terminal_inventory)],
+        "Std terminal inventory": [np.std(terminal_inventory)]
+    }, index=["RL Agent"])
+
+    fig = plot_pnl(total_rewards)
+
     return results, fig, total_rewards

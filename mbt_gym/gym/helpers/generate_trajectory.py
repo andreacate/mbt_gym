@@ -184,3 +184,70 @@ def generate_trajectory_rl(env: gym.Env, rl_agent: SbAgent, use_normalized_agent
         return observations, actions, rewards, log_probs
     else:
         return observations, actions, rewards
+    
+
+def generate_trajectory_rl_fast(env, rl_agent, use_normalized_agent=False):
+    """
+    Memory-optimized trajectory generator.
+    Only collects:
+    - total rewards
+    - mean half-spreads
+    - terminal inventory
+    """
+
+    # reset and get initial observations
+    obs = env.reset()
+    if isinstance(obs, tuple):
+        obs = obs[0]
+
+    num_traj = env.num_trajectories
+    obs_dim = obs.shape[1]
+    action_dim = env.action_space.shape[0]
+
+    # allocate only statistics
+    total_rewards = np.zeros(num_traj)
+    sum_half_spreads = np.zeros(num_traj)
+    terminal_inventory = np.zeros(num_traj)
+
+    step = 0
+
+    while True:
+        current_obs = obs
+
+        # normalization
+        if use_normalized_agent:
+            rl_obs = env.normalise_observation(current_obs, inverse=False, force=True)
+        else:
+            rl_obs = current_obs
+
+        # reduced state
+        if getattr(rl_agent, "reduced_training", False):
+            rl_obs = rl_obs[:, rl_agent.reduced_training_indices]
+
+        # get action
+        action = rl_agent.get_action(rl_obs)
+
+        # accumulate average half-spread (mean over dimensions)
+        sum_half_spreads += action.mean(axis=-1)
+
+        # perform step
+        obs, reward, done, info = env.step(action)
+        if isinstance(obs, tuple):
+            obs = obs[0]
+
+        # accumulate rewards
+        total_rewards += reward.reshape(-1)
+
+        step += 1
+
+        if done[0] or step >= env.n_steps:
+            break
+
+    # terminal inventory is last observation
+    terminal_inventory = obs[:, INVENTORY_INDEX]
+
+    # compute mean spread = 2 × mean half-spread
+    mean_spread = 2 * (sum_half_spreads / step)
+
+    return total_rewards, terminal_inventory, mean_spread
+
