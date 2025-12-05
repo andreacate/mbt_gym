@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from scipy import stats
 import seaborn as sns
 
 from mbt_gym.agents.Agent import Agent
@@ -523,15 +524,30 @@ def generate_results_table_and_hist_rl(vec_env: TradingEnvironment, rl_agent: Sb
     
     return results, fig, total_rewards
 
-def generate_results_table_and_hist_rl_fast(vec_env: TradingEnvironment, rl_agent: SbAgent, use_normalized_agent: bool = False, n_episodes: int = 1000):
+def generate_results_table_and_hist_rl_fast(vec_env, rl_agent, use_normalized_agent=False, n_episodes=1000):
     
     total_rewards, terminal_inventory, mean_spread = generate_trajectory_rl_fast(
         vec_env, rl_agent, use_normalized_agent=use_normalized_agent)
 
+    # mean and std
+    mean_pnl = np.mean(total_rewards)
+    std_pnl = np.std(total_rewards, ddof=1)
+
+    # 95% CI (normal approximation)
+    n = len(total_rewards)
+    ci_low, ci_high = stats.t.interval(
+    confidence=0.95,
+    df=n - 1,
+    loc=mean_pnl,
+    scale=std_pnl / np.sqrt(n)
+)
+
     results = pd.DataFrame({
         "Mean spread": [np.mean(mean_spread)],
-        "Mean PnL": [np.mean(total_rewards)],
-        "Std PnL": [np.std(total_rewards)],
+        "Mean PnL": [mean_pnl],
+        "Std PnL": [std_pnl],
+        "PnL CI 95% low": [ci_low],
+        "PnL CI 95% high": [ci_high],
         "Mean terminal inventory": [np.mean(terminal_inventory)],
         "Std terminal inventory": [np.std(terminal_inventory)]
     }, index=["RL Agent"])
