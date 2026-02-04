@@ -199,7 +199,7 @@ class ModifiedPoissonArrivalModel(ArrivalModel):
         self.fads_proportion = fads_proportion
         self.sigma = sigma
 
-         # Initialize initial_state with correct shape (num_trajectories, 2)
+        # Initialize initial_state with correct shape (num_trajectories, 2)
         #initial_state = np.zeros((1, 2))
         initial_state = np.ones((1, 2)) * (self.phi + self.psi) 
 
